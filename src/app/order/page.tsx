@@ -89,11 +89,16 @@ const statusMessageText = (status: string) => ({
   canceled: "pesanan Anda dibatalkan"
 }[statusKind(status)] || "ada pembaruan untuk pesanan Anda");
 
+let orderAudioContext: AudioContext | null = null;
 const playDefaultBeep = () => {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    const ctx = new AudioContextClass();
+    if (!AudioContextClass) return;
+    // Pakai satu context yang dibuka lewat klik admin (tes suara), jangan tutup setelah beep pertama.
+    orderAudioContext ||= new AudioContextClass();
+    const ctx = orderAudioContext;
     const play = () => {
+      if (ctx.state !== "running") return;
       const now = ctx.currentTime;
       const osc1 = ctx.createOscillator();
       const gain1 = ctx.createGain();
@@ -116,7 +121,6 @@ const playDefaultBeep = () => {
       gain2.connect(ctx.destination);
       osc2.start(now + 0.12);
       osc2.stop(now + 0.7);
-      window.setTimeout(() => { void ctx.close().catch(() => {}); }, 1000);
     };
     if (ctx.state === "suspended") void ctx.resume().then(play).catch(error => console.error("Audio resume error:", error));
     else play();
@@ -306,11 +310,11 @@ export default function OrderPage() {
 
   const triggerNotificationSound = () => {
     if (!soundEnabled) return;
+    // Bunyi pendek bawaan selalu diputar agar order tetap terdengar, termasuk bila audio kustom senyap/gagal.
+    playDefaultBeep();
     if (customAudioData && audioRef.current) {
       audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(() => playDefaultBeep());
-    } else {
-      playDefaultBeep();
+      audioRef.current.play().catch(error => console.warn("Audio kustom gagal diputar:", error));
     }
   };
 
@@ -673,6 +677,9 @@ export default function OrderPage() {
           </div>
 
           <div className="flex items-center gap-1.5">
+            <button onClick={() => { playDefaultBeep(); showToast("Tes suara notifikasi"); }} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Tes suara notifikasi" aria-label="Tes suara notifikasi">
+              <Play size={16} />
+            </button>
             <button
               onClick={() => {
                 const nextEnabled = !soundEnabled;

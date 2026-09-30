@@ -7,20 +7,19 @@ interface Env {
   ALLOWED_ORIGIN: string;
 }
 
+type FirebaseUser = { localId?: string; disabled?: boolean; email?: string; emailVerified?: boolean };
+const ADMIN_EMAIL = "dianarifin.shopeedriver@gmail.com";
 const originAllowed = (origin: string, allowed: string) => allowed.split(",").map(value => value.trim()).filter(Boolean).includes(origin);
+const cors = (origin: string, allowed: string): Record<string, string> => originAllowed(origin, allowed) ? {
+  "access-control-allow-origin": origin,
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "Authorization, Content-Type",
+  "access-control-max-age": "86400",
+  "vary": "Origin",
+} : {};
 const json = (body: unknown, status = 200, origin = "", allowedOrigin = "") => new Response(JSON.stringify(body), {
   status,
-  headers: {
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
-    ...(origin && originAllowed(origin, allowedOrigin) ? {
-      "access-control-allow-origin": origin,
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "Authorization, Content-Type",
-      "access-control-max-age": "86400",
-      "vary": "Origin",
-    } : {}),
-  },
+  headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...cors(origin, allowedOrigin) },
 });
 
 function base64(bytes: Uint8Array) {
@@ -30,58 +29,82 @@ function base64(bytes: Uint8Array) {
   return btoa(binary);
 }
 
+async function firebaseUserForToken(idToken: string, env: Env): Promise<FirebaseUser | null> {
+  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(env.FIREBASE_API_KEY)}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ idToken }),
+  });
+  if (!response.ok) return null;
+  const result = await response.json() as { users?: FirebaseUser[] };
+  const user = result.users?.[0];
+  return user?.localId && !user.disabled ? user : null;
+}
+
+function repoDetails(env: Env) {
+  const repo = env.GITHUB_PROOF_REPO.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, "");
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) return null;
+  const [owner, name] = repo.split("/");
+  return { owner, name, branch: env.GITHUB_PROOF_BRANCH || "main" };
+}
+
+async function privateRepoCheck(owner: string, name: string, env: Env): Promise<boolean> {
+  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+    headers: { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "user-agent": "POS-private-proof-proxy" },
+  });
+  if (!response.ok) return false;
+  const repo = await response.json() as { private?: boolean };
+  return repo.private === true;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get("origin") || "";
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: {
-      "access-control-allow-origin": originAllowed(origin, env.ALLOWED_ORIGIN) ? origin : "null",
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "Authorization, Content-Type",
-      "access-control-max-age": "86400",
-      "vary": "Origin",
-    }});
-    if (request.method !== "POST") return json({ error: "Metode tidak diizinkan." }, 405, origin, env.ALLOWED_ORIGIN);
+    if (request.method === "OPTIONS") return new Response(null, {
+      status: 204,
+      headers: { "access-control-allow-origin": originAllowed(origin, env.ALLOWED_ORIGIN) ? origin : "null", "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type", "access-control-max-age": "86400", vary: "Origin" },
+    });
+    if (request.method !== "GET" && request.method !== "POST") return json({ error: "Metode tidak diizinkan." }, 405, origin, env.ALLOWED_ORIGIN);
     if (!origin || !originAllowed(origin, env.ALLOWED_ORIGIN)) return json({ error: "Origin tidak diizinkan." }, 403);
-    if (!env.GITHUB_TOKEN || !env.GITHUB_PROOF_REPO || !env.FIREBASE_API_KEY || !env.FIREBASE_DATABASE_URL) {
-      return json({ error: "Pengaturan server upload bukti belum lengkap." }, 503, origin, env.ALLOWED_ORIGIN);
-    }
+    if (!env.GITHUB_TOKEN || !env.GITHUB_PROOF_REPO || !env.FIREBASE_API_KEY || !env.FIREBASE_DATABASE_URL) return json({ error: "Pengaturan server bukti privat belum lengkap." }, 503, origin, env.ALLOWED_ORIGIN);
 
     const authorization = request.headers.get("authorization") || "";
     const idToken = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-    if (!idToken) return json({ error: "Login diperlukan untuk mengunggah bukti." }, 401, origin, env.ALLOWED_ORIGIN);
+    if (!idToken) return json({ error: "Login diperlukan." }, 401, origin, env.ALLOWED_ORIGIN);
+    const firebaseUser = await firebaseUserForToken(idToken, env);
+    if (!firebaseUser) return json({ error: "Sesi Firebase tidak valid. Silakan login ulang." }, 401, origin, env.ALLOWED_ORIGIN);
 
-    // Validate Firebase ID token server-side; the GitHub credential never reaches the browser.
-    const identityResponse = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(env.FIREBASE_API_KEY)}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ idToken }),
-    });
-    if (!identityResponse.ok) return json({ error: "Sesi login tidak valid. Silakan login ulang." }, 401, origin, env.ALLOWED_ORIGIN);
-    const identity = await identityResponse.json() as { users?: Array<{ localId?: string; disabled?: boolean }> };
-    const firebaseUser = identity.users?.[0];
-    if (!firebaseUser?.localId || firebaseUser.disabled) return json({ error: "Akun tidak valid." }, 401, origin, env.ALLOWED_ORIGIN);
+    const repo = repoDetails(env);
+    if (!repo) return json({ error: "Nama repo GitHub tidak valid." }, 500, origin, env.ALLOWED_ORIGIN);
+    const isPrivate = await privateRepoCheck(repo.owner, repo.name, env);
+    if (!isPrivate) return json({ error: "Upload bukti dihentikan: repo tujuan harus Private agar foto pelanggan tidak publik." }, 409, origin, env.ALLOWED_ORIGIN);
+
+    if (request.method === "GET") {
+      if (firebaseUser.email?.toLowerCase() !== ADMIN_EMAIL || firebaseUser.emailVerified !== true) return json({ error: "Hanya admin terverifikasi yang boleh melihat bukti pembayaran." }, 403, origin, env.ALLOWED_ORIGIN);
+      const path = new URL(request.url).searchParams.get("path") || "";
+      if (!/^payment-proofs\/\d{4}-\d{2}-\d{2}\/[A-Za-z0-9_-]+\.(jpg|png|webp)$/.test(path)) return json({ error: "Path bukti tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
+      const fileUrl = `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(repo.branch)}`;
+      const fileResponse = await fetch(fileUrl, {
+        headers: { "accept": "application/vnd.github.raw", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "user-agent": "POS-private-proof-proxy" },
+      });
+      if (!fileResponse.ok) return json({ error: "Bukti privat tidak ditemukan atau GitHub menolak akses." }, 404, origin, env.ALLOWED_ORIGIN);
+      const contentType = path.endsWith(".png") ? "image/png" : path.endsWith(".webp") ? "image/webp" : "image/jpeg";
+      return new Response(fileResponse.body, { status: 200, headers: { "content-type": contentType, "cache-control": "private, no-store", ...cors(origin, env.ALLOWED_ORIGIN) } });
+    }
 
     const contentLength = Number(request.headers.get("content-length") || 0);
     if (contentLength > 6 * 1024 * 1024) return json({ error: "Ukuran upload terlalu besar (maksimal foto 5 MB)." }, 413, origin, env.ALLOWED_ORIGIN);
     let form: FormData;
-    try { form = await request.formData(); }
-    catch { return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN); }
+    try { form = await request.formData(); } catch { return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN); }
     const file = form.get("proof");
     const orderId = String(form.get("orderId") || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
-    const consent = form.get("publicConsent") === "true";
     const dateKey = String(form.get("dateKey") || "").replace(/[^0-9]/g, "");
     const uniqueCode = Number(form.get("uniqueCode") || 0);
-    if (!(file instanceof File) || !orderId || !/^\d{8}$/.test(dateKey) || !Number.isInteger(uniqueCode) || uniqueCode < 1 || uniqueCode > 499) {
-      return json({ error: "Foto, order, atau kode unik tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
-    }
-    if (!consent) return json({ error: "Persetujuan publikasi foto bukti diperlukan." }, 400, origin, env.ALLOWED_ORIGIN);
+    if (!(file instanceof File) || !orderId || !/^\d{8}$/.test(dateKey) || !Number.isInteger(uniqueCode) || uniqueCode < 1 || uniqueCode > 499) return json({ error: "Foto, order, atau kode unik tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
 
-    // Ensure this signed-in user owns the still-active code reservation used by the checkout.
     const dbRoot = env.FIREBASE_DATABASE_URL.replace(/\/$/, "");
     const reservationResponse = await fetch(`${dbRoot}/qrisPaymentReservations/${dateKey}/${uniqueCode}.json?auth=${encodeURIComponent(idToken)}`);
     if (!reservationResponse.ok) return json({ error: "Tidak bisa memverifikasi reservasi kode unik." }, 403, origin, env.ALLOWED_ORIGIN);
     const reservation = await reservationResponse.json() as { uid?: string; orderId?: string; expiresAt?: number } | null;
-    if (!reservation || reservation.uid !== firebaseUser.localId || reservation.orderId !== orderId || Number(reservation.expiresAt || 0) < Date.now()) {
-      return json({ error: "Kode unik tidak cocok dengan akun/order atau reservasinya kedaluwarsa." }, 403, origin, env.ALLOWED_ORIGIN);
-    }
+    if (!reservation || reservation.uid !== firebaseUser.localId || reservation.orderId !== orderId || Number(reservation.expiresAt || 0) < Date.now()) return json({ error: "Kode unik tidak cocok dengan akun/order atau reservasinya kedaluwarsa." }, 403, origin, env.ALLOWED_ORIGIN);
 
     if (!file.type.startsWith("image/") || file.size < 1 || file.size > 5 * 1024 * 1024) return json({ error: "Foto harus berupa gambar maksimal 5 MB." }, 413, origin, env.ALLOWED_ORIGIN);
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -91,31 +114,19 @@ export default {
     if (!isPng && !isJpeg && !isWebp) return json({ error: "Format foto tidak dikenali. Gunakan JPG, PNG, atau WebP." }, 415, origin, env.ALLOWED_ORIGIN);
 
     const extension = isPng ? "png" : isWebp ? "webp" : "jpg";
-    const repo = env.GITHUB_PROOF_REPO.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, "");
-    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) return json({ error: "Nama repo GitHub tidak valid." }, 500, origin, env.ALLOWED_ORIGIN);
-    const branch = env.GITHUB_PROOF_BRANCH || "main";
     const date = new Date().toISOString().slice(0, 10);
     const path = `payment-proofs/${date}/${orderId}-${crypto.randomUUID()}.${extension}`;
-    const [owner, name] = repo.split("/");
-    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/${path.split("/").map(encodeURIComponent).join("/")}`;
-    const githubResponse = await fetch(apiUrl, {
+    const fileUrl = `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/contents/${path.split("/").map(encodeURIComponent).join("/")}`;
+    const uploadResponse = await fetch(fileUrl, {
       method: "PUT",
-      headers: {
-        "accept": "application/vnd.github+json",
-        "authorization": `Bearer ${env.GITHUB_TOKEN}`,
-        "x-github-api-version": "2022-11-28",
-        "content-type": "application/json",
-        "user-agent": "POS-payment-proof-uploader",
-      },
-      body: JSON.stringify({ message: `Upload bukti QRIS untuk ${orderId}`, content: base64(bytes), branch }),
+      headers: { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "content-type": "application/json", "user-agent": "POS-private-proof-uploader" },
+      body: JSON.stringify({ message: `Upload bukti QRIS untuk ${orderId}`, content: base64(bytes), branch: repo.branch }),
     });
-    if (!githubResponse.ok) {
-      const detail = await githubResponse.text();
-      console.error("GitHub upload failed", githubResponse.status, detail.slice(0, 600));
-      return json({ error: "Upload GitHub gagal. Periksa token, izin Contents: Read and write, repo, dan branch." }, 502, origin, env.ALLOWED_ORIGIN);
+    if (!uploadResponse.ok) {
+      const detail = await uploadResponse.text();
+      console.error("Private GitHub upload failed", uploadResponse.status, detail.slice(0, 600));
+      return json({ error: "Upload ke repo GitHub Private gagal. Periksa token, izin Contents: Read and write, repo, dan branch." }, 502, origin, env.ALLOWED_ORIGIN);
     }
-
-    const url = `https://raw.githubusercontent.com/${owner}/${name}/${encodeURIComponent(branch)}/${path.split("/").map(encodeURIComponent).join("/")}`;
-    return json({ url, path }, 200, origin, env.ALLOWED_ORIGIN);
+    return json({ path }, 200, origin, env.ALLOWED_ORIGIN);
   },
 };
