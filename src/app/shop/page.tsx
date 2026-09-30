@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { 
   Search, Plus, Minus, ShoppingBasket, User, 
   ChevronRight, Home, Clock, ClipboardList, Settings, MapPin, CheckCircle,
-  Heart, Share2, X, ArrowLeft, LogOut
+  Heart, Share2, X, ArrowLeft, LogOut, QrCode
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, set, push, update, query, orderByChild, equalTo } from "firebase/database";
@@ -54,6 +54,7 @@ const orderStatusKind = (status: string) => {
   if (["COMPLETED", "PESANAN SUDAH DIAMBIL", "SUDAH DIAMBIL", "SELESAI"].includes(s)) return "completed";
   if (["CANCELED", "CANCELLED", "PESANAN DIBATALKAN", "DIBATALKAN"].includes(s)) return "canceled";
   if (["READY", "PESANAN SIAP"].includes(s)) return "ready";
+  if (["PENDING_PAYMENT", "MENUNGGU PEMBAYARAN QRIS"].includes(s)) return "pendingPayment";
   return "processing";
 };
 
@@ -63,6 +64,7 @@ const getStatusText = (status: string) => {
   if (kind === "completed") return "Pesanan sudah diambil";
   if (kind === "canceled") return "Pesanan dibatalkan";
   if (kind === "ready") return "Pesanan siap";
+  if (kind === "pendingPayment") return "Menunggu verifikasi pembayaran QRIS";
   return "Pesanan di Proses";
 };
 
@@ -86,6 +88,9 @@ export default function ShopPage() {
   const [selectedCategory, setSelectedCategory] = useState("Semua");
   const [orderType, setOrderType] = useState<"delivery"|"takeaway">("delivery");
   const [editProfile, setEditProfile] = useState({ phone: "", address: "" });
+  const [qrisImageUrl, setQrisImageUrl] = useState("");
+  const [isQrisOpen, setIsQrisOpen] = useState(false);
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
   useEffect(() => {
     setIsClient(true);
@@ -145,6 +150,10 @@ export default function ShopPage() {
       setProducts(list);
     }, (error) => console.error("Gagal memuat produk Shop:", error));
 
+    const unsubPaymentSettings = onValue(ref(db, "publicPaymentSettings/qrisImageUrl"), (snap) => {
+      setQrisImageUrl(typeof snap.val() === "string" ? snap.val() : "");
+    }, (error) => console.error("Gagal memuat QRIS:", error));
+
     let unsubOrders: (() => void) | undefined;
     if (user?.uid) {
       // Hanya ambil pesanan milik user yang login; jangan unduh seluruh node orders.
@@ -161,7 +170,7 @@ export default function ShopPage() {
       setOrders([]);
     }
 
-    return () => { unsubProducts(); unsubOrders?.(); };
+    return () => { unsubProducts(); unsubPaymentSettings(); unsubOrders?.(); };
   }, [user?.uid]);
 
   useEffect(() => {
@@ -184,14 +193,21 @@ export default function ShopPage() {
 
   const handleSaveProfile = () => {
     if (!user) return;
+    if (!editProfile.phone.trim() || !editProfile.address.trim()) {
+      alert("Nomor WhatsApp dan alamat wajib diisi untuk membuat pesanan.");
+      return;
+    }
     update(ref(db, `users/${user.uid}`), {
       name: user.name,
       email: user.email,
       photoURL: user.photoURL,
-      phone: editProfile.phone,
-      address: editProfile.address,
+      phone: editProfile.phone.trim(),
+      address: editProfile.address.trim(),
       favorites
-    }).then(() => alert("Profil berhasil disimpan!"));
+    }).then(() => {
+      setUser({ ...user, phone: editProfile.phone.trim(), address: editProfile.address.trim() });
+      alert("Profil berhasil disimpan!");
+    });
   };
 
   // ==============================================
@@ -228,21 +244,63 @@ export default function ShopPage() {
   const cartCount = cart.reduce((s, i) => s + i.qty, 0);
   const cartTotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
 
-  const handleCheckout = () => {
+  const handleCheckout = async () => {
     if (!user) return alert("Login dulu untuk pesan!");
-    if (orderType === "delivery" && !user.address) {
-      alert("Harap isi Alamat Pengiriman di menu Pengaturan!");
-      setActiveTab("settings"); return;
+    if (cart.length === 0) return alert("Keranjang masih kosong.");
+
+    const phone = editProfile.phone.trim() || user.phone?.trim() || "";
+    const address = editProfile.address.trim() || user.address?.trim() || "";
+    if (!phone || !address) {
+      alert("Nomor WhatsApp dan alamat wajib diisi sebelum membuat pesanan.");
+      setActiveTab("settings");
+      return;
     }
+    if (!qrisImageUrl) {
+      alert("QRIS belum diatur oleh admin. Silakan hubungi toko.");
+      return;
+    }
+
+    try {
+      await update(ref(db, `users/${user.uid}`), {
+        name: user.name, email: user.email, photoURL: user.photoURL,
+        phone, address, favorites
+      });
+      setUser({ ...user, phone, address });
+      setIsQrisOpen(true);
+    } catch (error) {
+      console.error("Gagal menyimpan data pelanggan:", error);
+      alert("Data WhatsApp/alamat gagal disimpan. Periksa koneksi lalu coba lagi.");
+    }
+  };
+
+  const submitQrisOrderForVerification = async () => {
+    if (!user || !qrisImageUrl || cart.length === 0 || isSubmittingOrder) return;
+    setIsSubmittingOrder(true);
     const orderRef = push(ref(db, "orders"));
-    set(orderRef, {
-      orderNumber: "ORD-" + Math.random().toString(36).substr(2, 6).toUpperCase(),
-      date: new Date().toLocaleString("id-ID"), createdAt: Date.now(),
-      items: cart, total: cartTotal, source: "shop", status: "NEW", orderType,
-      customer: { uid: user.uid, name: user.name, phone: user.phone || "", address: user.address || "" }
-    }).then(() => {
-      setCart([]); setActiveTab("active"); alert("Pesanan berhasil dibuat!");
-    });
+    try {
+      await set(orderRef, {
+        orderNumber: "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase(),
+        date: new Date().toLocaleString("id-ID"),
+        createdAt: Date.now(),
+        items: cart,
+        total: cartTotal,
+        source: "shop",
+        status: "PENDING_PAYMENT",
+        paymentStatus: "CUSTOMER_CLAIMS_PAID",
+        paymentMethod: "QRIS",
+        orderType,
+        customer: { uid: user.uid, name: user.name, phone: editProfile.phone.trim() || user.phone || "", address: editProfile.address.trim() || user.address || "" }
+      });
+      setCart([]);
+      setIsQrisOpen(false);
+      setActiveTab("active");
+      alert("Pesanan tercatat dan menunggu admin memverifikasi pembayaran QRIS. Pesanan baru dikirim ke dapur setelah pembayaran dikonfirmasi.");
+    } catch (error) {
+      console.error("Gagal mengirim pesanan QRIS:", error);
+      alert("Pesanan gagal dikirim. Periksa koneksi lalu coba lagi.");
+    } finally {
+      setIsSubmittingOrder(false);
+    }
   };
 
   const toggleFavorite = (id: string) => {
@@ -577,7 +635,7 @@ export default function ShopPage() {
                     {!user ? (
                       <button onClick={handleLogin} className="w-full py-3.5 bg-slate-800 text-white rounded-2xl font-bold text-sm hover:bg-slate-900 transition-colors">Login untuk Pesan</button>
                     ) : (
-                      <button onClick={handleCheckout} className="w-full py-3.5 bg-orange-500 text-white rounded-2xl font-bold text-sm shadow-lg shadow-orange-500/30 hover:bg-orange-600 transition-all active:scale-95">Buat Pesanan Sekarang</button>
+                      <button onClick={handleCheckout} className="w-full py-3.5 bg-orange-500 text-white rounded-2xl font-bold text-sm shadow-lg shadow-orange-500/30 hover:bg-orange-600 transition-all active:scale-95">Lanjut Pembayaran QRIS</button>
                     )}
                   </div>
                 </div>
@@ -663,11 +721,11 @@ export default function ShopPage() {
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1.5">No. WhatsApp</label>
-                    <input type="text" value={editProfile.phone} onChange={e=>setEditProfile({...editProfile, phone: e.target.value})} placeholder="Contoh: 08123456789" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400 transition-all"/>
+                    <input required type="tel" value={editProfile.phone} onChange={e=>setEditProfile({...editProfile, phone: e.target.value})} placeholder="Contoh: 08123456789" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400 transition-all"/>
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1.5 flex items-center gap-1"><MapPin size={14}/> Alamat Pengiriman</label>
-                    <textarea value={editProfile.address} onChange={e=>setEditProfile({...editProfile, address: e.target.value})} rows={3} placeholder="Alamat lengkap (Jalan, RT/RW, Patokan)..." className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400 transition-all"/>
+                    <textarea required value={editProfile.address} onChange={e=>setEditProfile({...editProfile, address: e.target.value})} rows={3} placeholder="Alamat lengkap (Jalan, RT/RW, Patokan)..." className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400 transition-all"/>
                   </div>
                   <button onClick={handleSaveProfile} className="w-full bg-slate-900 hover:bg-slate-800 text-white py-3.5 rounded-2xl font-bold text-sm flex justify-center items-center gap-2 shadow-lg transition-colors">
                     <CheckCircle size={16}/> Simpan Perubahan
@@ -713,6 +771,30 @@ export default function ShopPage() {
 
         {/* POPUP 2: CUSTOM PEMBELIAN */}
         <CustomPurchaseModal />
+
+        {/* QRIS statis: pesanan menunggu verifikasi admin sebelum masuk dapur. */}
+        {isQrisOpen && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4">
+            <section className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
+              <div className="mb-4 flex items-center justify-between">
+                <div><h2 className="text-lg font-black text-slate-900">Pembayaran QRIS</h2><p className="text-xs text-slate-500">Scan lalu bayar sesuai total pesanan</p></div>
+                <button onClick={() => setIsQrisOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500" aria-label="Tutup QRIS"><X size={18}/></button>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Total yang harus dibayar</p>
+                <p className="mt-1 text-2xl font-black text-orange-600">{formatRp(cartTotal)}</p>
+                <img src={qrisImageUrl} alt="QRIS toko" referrerPolicy="no-referrer" className="mx-auto mt-4 aspect-square w-56 rounded-xl bg-white object-contain p-2" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+              </div>
+              <div className="mt-4 space-y-2 rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
+                <p className="font-bold">Setelah membayar, tekan tombol konfirmasi di bawah.</p>
+                <p>Dengan QRIS statis, sistem tidak dapat mendeteksi pembayaran otomatis. Admin akan memeriksa transaksi di aplikasi merchant; pesanan baru dikirim ke dapur setelah admin mengonfirmasi.</p>
+              </div>
+              <button onClick={submitQrisOrderForVerification} disabled={isSubmittingOrder} className="mt-4 w-full rounded-xl bg-emerald-600 py-3.5 text-sm font-black text-white disabled:opacity-50">
+                {isSubmittingOrder ? "Mengirim…" : "Saya Sudah Bayar — Kirim untuk Verifikasi"}
+              </button>
+            </section>
+          </div>
+        )}
 
       </div>
     </div>

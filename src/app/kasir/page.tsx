@@ -70,6 +70,7 @@ export default function KasirPage() {
   const [settings, setSettings] = useState({
     storeName: "Toko Kasir", receiptHeader: "Toko Utama\nJl. Merdeka No.1", receiptFooter: "Terima Kasih!"
   });
+  const [qrisImageUrl, setQrisImageUrl] = useState("");
 
   // ==============================================
   // FIREBASE LISTENERS & AUTH CHECK
@@ -115,8 +116,11 @@ export default function KasirPage() {
     const unsubSettings = onValue(ref(db, "settings"), (snap) => {
       if (snap.exists()) setSettings(snap.val());
     });
+    const unsubQrisSettings = onValue(ref(db, "publicPaymentSettings/qrisImageUrl"), (snap) => {
+      setQrisImageUrl(typeof snap.val() === "string" ? snap.val() : "");
+    });
 
-    return () => { unsubAuth(); unsubProducts(); unsubCategories(); unsubOrders(); unsubSettings(); };
+    return () => { unsubAuth(); unsubProducts(); unsubCategories(); unsubOrders(); unsubSettings(); unsubQrisSettings(); };
   }, [router]);
 
   const handleLogin = async () => {
@@ -206,6 +210,19 @@ export default function KasirPage() {
   };
   const handleSaveSettings = () => {
     set(ref(db, "settings"), settings).then(() => alert("Pengaturan tersimpan!"));
+  };
+
+  const handleSaveQrisUrl = async () => {
+    const value = qrisImageUrl.trim();
+    if (!value) return alert("Masukkan URL gambar QRIS terlebih dahulu.");
+    try {
+      new URL(value);
+      await set(ref(db, "publicPaymentSettings/qrisImageUrl"), value);
+      alert("QRIS berhasil disimpan dan tampil di Shop.");
+    } catch (error) {
+      console.error(error);
+      alert("URL QRIS tidak valid atau gagal disimpan.");
+    }
   };
 
   // ==============================================
@@ -395,7 +412,7 @@ export default function KasirPage() {
 
       {activeTab === "riwayat" && <main className="flex-1 overflow-y-auto bg-slate-50 p-6 print:hidden"><div className="flex justify-between items-center mb-6"><h1 className="text-2xl font-black text-slate-800">Riwayat Transaksi (Cloud)</h1><button onClick={handleClearAllHistory} className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg font-bold text-sm shadow-md transition-colors flex items-center gap-2"><Trash2 size={16}/> Kosongkan Semua Riwayat</button></div><div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-slate-500 text-xs"><tr><th className="p-3 rounded-tl-lg">ID & Waktu</th><th className="p-3">Detail Pesanan</th><th className="p-3">Total & Metode</th><th className="p-3 rounded-tr-lg text-center">Hapus</th></tr></thead><tbody className="divide-y divide-slate-100">{kasirOrders.length === 0 && <tr><td colSpan={4} className="text-center p-8 text-slate-400 font-medium">Belum ada riwayat transaksi Kasir.</td></tr>}{kasirOrders.map(o => <tr key={o.id} className="hover:bg-slate-50"><td className="p-3"><span className="font-bold text-slate-800 block">#{o.orderNumber}</span><span className="text-[10px] text-slate-500">{o.date}</span></td><td className="p-3">{o.items?.map((it, i) => <div key={i} className="text-xs mb-1"><span className="font-semibold text-slate-700">{it.qty}x {it.name}</span>{it.selectedVariants?.length > 0 && <span className="text-[10px] text-blue-600 font-semibold block ml-4">- {it.selectedVariants.join(", ")}</span>}{it.cookingMethod && <span className="text-[10px] text-slate-500 block ml-4">- {it.cookingMethod}</span>}</div>)}</td><td className="p-3"><span className="font-black text-blue-600 block">{formatRp(o.total)}</span><span className="text-[10px] font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded uppercase">{o.paymentMethod}</span></td><td className="p-3 text-center"><button onClick={() => handleDeleteOrder(o.id)} className="text-red-400 hover:text-red-600 bg-red-50 hover:bg-red-100 p-2 rounded-lg transition-colors inline-block"><Trash2 size={16}/></button></td></tr>)}</tbody></table></div></main>}
 
-      {activeTab === "settings" && <main className="flex-1 overflow-y-auto bg-slate-50 p-6 print:hidden"><h1 className="text-2xl font-black text-slate-800 mb-6">Pengaturan Kasir & Struk</h1><div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 max-w-2xl space-y-5"><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Nama Toko (Tampil di Kiri Atas Kasir)</label><input type="text" value={settings.storeName} onChange={e => setSettings({...settings, storeName:e.target.value})} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"/></div><div className="border-t border-slate-100 pt-5"><h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Printer size={18} className="text-blue-500"/> Format Struk (Printer 58mm)</h3><div className="space-y-4"><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Teks Header Struk (Alamat / Telp)</label><textarea value={settings.receiptHeader} onChange={e => setSettings({...settings, receiptHeader:e.target.value})} rows={3} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"/></div><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Teks Footer Struk (Ucapan Terima Kasih)</label><textarea value={settings.receiptFooter} onChange={e => setSettings({...settings, receiptFooter:e.target.value})} rows={2} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"/></div></div></div><button onClick={handleSaveSettings} className="w-full bg-slate-900 hover:bg-slate-800 text-white py-3.5 rounded-xl font-bold text-sm flex justify-center items-center gap-2 shadow-lg transition-colors mt-4"><Save size={16}/> Simpan Pengaturan</button></div></main>}
+      {activeTab === "settings" && <main className="flex-1 overflow-y-auto bg-slate-50 p-6 print:hidden"><h1 className="text-2xl font-black text-slate-800 mb-6">Pengaturan Kasir & Struk</h1><div className="mb-5 max-w-2xl rounded-2xl border border-emerald-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-slate-800">QRIS Shop</h2><p className="my-2 text-xs text-slate-500">Tempel URL publik untuk gambar QRIS resmi toko. Gambar ini akan dapat dilihat pelanggan Shop.</p><input type="url" value={qrisImageUrl} onChange={e => setQrisImageUrl(e.target.value)} placeholder="https://.../qris.png" className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-500"/><div className="mt-3 flex items-center gap-3"><button onClick={handleSaveQrisUrl} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white">Simpan QRIS</button>{qrisImageUrl && <img src={qrisImageUrl} alt="Preview QRIS" className="h-16 w-16 rounded-lg border object-contain"/>}</div></div><div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 max-w-2xl space-y-5"><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Nama Toko (Tampil di Kiri Atas Kasir)</label><input type="text" value={settings.storeName} onChange={e => setSettings({...settings, storeName:e.target.value})} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"/></div><div className="border-t border-slate-100 pt-5"><h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Printer size={18} className="text-blue-500"/> Format Struk (Printer 58mm)</h3><div className="space-y-4"><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Teks Header Struk (Alamat / Telp)</label><textarea value={settings.receiptHeader} onChange={e => setSettings({...settings, receiptHeader:e.target.value})} rows={3} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"/></div><div><label className="block text-xs font-bold text-slate-700 mb-1.5">Teks Footer Struk (Ucapan Terima Kasih)</label><textarea value={settings.receiptFooter} onChange={e => setSettings({...settings, receiptFooter:e.target.value})} rows={2} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"/></div></div></div><button onClick={handleSaveSettings} className="w-full bg-slate-900 hover:bg-slate-800 text-white py-3.5 rounded-xl font-bold text-sm flex justify-center items-center gap-2 shadow-lg transition-colors mt-4"><Save size={16}/> Simpan Pengaturan</button></div></main>}
 
       <KasirCustomModal />
 

@@ -6,7 +6,7 @@ import {
   Bell, Volume2, VolumeX, Upload, Download, Trash2, Printer, 
   Clock, CheckCircle2, XCircle, Settings, Store, ShoppingBag, 
   DollarSign, Users, UserX, LogOut, ChevronRight, Search, 
-  Flame, Check, Play, ShieldAlert, FileSpreadsheet
+  Flame, Check, Play, ShieldAlert, FileSpreadsheet, MessageCircle
 } from "lucide-react";
 import { auth, db } from "../../lib/firebase";
 import * as XLSX from "xlsx";
@@ -40,6 +40,7 @@ interface Order {
   items: CartItem[];
   total: number;
   paymentMethod?: string;
+  paymentStatus?: string;
   source: string; // "kasir" | "shop"
   status: string; // "PROCESSING" | "READY" | "COMPLETED" | "CANCELED"
   orderType?: string;
@@ -65,9 +66,23 @@ const statusKind = (status: string) => {
   if (["COMPLETED", "PESANAN SUDAH DIAMBIL", "SUDAH DIAMBIL", "SELESAI"].includes(s)) return "completed";
   if (["CANCELED", "CANCELLED", "PESANAN DIBATALKAN", "DIBATALKAN"].includes(s)) return "canceled";
   if (["READY", "PESANAN SIAP"].includes(s)) return "ready";
+  if (["PENDING_PAYMENT", "MENUNGGU PEMBAYARAN QRIS"].includes(s)) return "pendingPayment";
   return "processing";
 };
 const isFinishedStatus = (status: string) => ["completed", "canceled"].includes(statusKind(status));
+const toWhatsAppNumber = (phone: string) => {
+  let digits = (phone || "").replace(/\D/g, "");
+  if (digits.startsWith("0")) digits = `62${digits.slice(1)}`;
+  else if (digits.startsWith("8")) digits = `62${digits}`;
+  return digits;
+};
+const statusMessageText = (status: string) => ({
+  pendingPayment: "pesanan Anda menunggu verifikasi pembayaran QRIS",
+  processing: "pesanan Anda sedang diproses",
+  ready: "pesanan Anda siap diambil",
+  completed: "pesanan Anda sudah diambil",
+  canceled: "pesanan Anda dibatalkan"
+}[statusKind(status)] || "ada pembaruan untuk pesanan Anda");
 
 const playDefaultBeep = () => {
   try {
@@ -186,7 +201,7 @@ export default function OrderPage() {
         loaded.sort((a, b) => b.createdAt - a.createdAt);
         setOrders(loaded);
 
-        const activeCount = loaded.filter(o => !isFinishedStatus(o.status)).length;
+        const activeCount = loaded.filter(o => ["processing", "ready"].includes(statusKind(o.status))).length;
         if (initialLoaded && prevActiveOrderCount !== null && activeCount > prevActiveOrderCount) {
           triggerNotificationSound();
           showToast("Pesanan baru masuk!");
@@ -268,6 +283,21 @@ export default function OrderPage() {
       }
     } catch (e: any) {
       alert("Gagal memperbarui status: " + e.message);
+    }
+  };
+
+  const confirmQrisPayment = async (order: Order) => {
+    const confirmed = window.confirm(`Pastikan dana QRIS untuk ${order.orderNumber} sudah terlihat masuk di rekening/merchant sebelum konfirmasi. Lanjutkan?`);
+    if (!confirmed) return;
+    try {
+      await update(ref(db, `orders/${order.id}`), {
+        status: "PROCESSING",
+        paymentStatus: "VERIFIED_MANUALLY",
+        paymentVerifiedAt: Date.now()
+      });
+      showToast("Pembayaran QRIS dikonfirmasi; pesanan masuk ke dapur.");
+    } catch (error: any) {
+      alert("Gagal mengonfirmasi pembayaran: " + error.message);
     }
   };
 
@@ -476,6 +506,8 @@ export default function OrderPage() {
         return <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Pesanan di Proses</span>;
       case "ready":
         return <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Pesanan siap</span>;
+      case "pendingPayment":
+        return <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">Menunggu verifikasi QRIS</span>;
       case "completed":
         return <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">Pesanan sudah diambil</span>;
       case "canceled":
@@ -667,13 +699,21 @@ export default function OrderPage() {
                         </div>
 
                         {/* Baris 2: Info Pelanggan jika ada */}
-                        {order.customer?.name && (
-                          <div className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded-xl">
-                            <span className="font-semibold text-slate-800">{order.customer.name}</span>
-                            {order.customer.phone && <span className="text-slate-400"> • {order.customer.phone}</span>}
-                            {order.customer.address && (
-                              <p className="text-[10px] text-slate-500 mt-0.5 truncate">{order.customer.address}</p>
+                        {(order.customer?.name || order.customer?.phone || order.customer?.address) && (
+                          <div className="text-[11px] text-slate-600 bg-slate-50 p-2.5 rounded-xl space-y-1.5">
+                            <p className="font-semibold text-slate-800">{order.customer?.name || "Pelanggan"}</p>
+                            {order.customer?.phone && (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-slate-600">WhatsApp: {order.customer.phone}</span>
+                                <a
+                                  href={`https://wa.me/${toWhatsAppNumber(order.customer.phone)}?text=${encodeURIComponent(`Halo ${order.customer?.name || "Pelanggan"}, update pesanan ${order.orderNumber}: ${statusMessageText(order.status)}.`)}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-green-700"
+                                ><MessageCircle size={12}/> WhatsApp</a>
+                              </div>
                             )}
+                            {order.customer?.address && <p className="whitespace-pre-wrap text-[10px] text-slate-600">Alamat: {order.customer.address}</p>}
                           </div>
                         )}
 
@@ -705,6 +745,13 @@ export default function OrderPage() {
 
                         {/* Baris 5: Tombol Aksi Status */}
                         <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-100">
+                          {statusKind(order.status) === "pendingPayment" ? (
+                            <div className="col-span-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                              <p className="text-xs leading-relaxed text-amber-900">Pelanggan mengaku sudah membayar QRIS. Cocokkan nominal dan transaksi di aplikasi merchant terlebih dahulu.</p>
+                              <button onClick={() => confirmQrisPayment(order)} className="w-full rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-black text-white hover:bg-emerald-700">Pembayaran Terverifikasi — Kirim ke Dapur</button>
+                            </div>
+                          ) : (
+                            <>
                           {/* Tombol: Pesanan di Proses */}
                           {statusKind(order.status) !== "processing" && (
                             <button
@@ -733,6 +780,9 @@ export default function OrderPage() {
                             <CheckCircle2 size={14} className="text-emerald-400" />
                             <span>Pesanan sudah diambil</span>
                           </button>
+
+                            </>
+                          )}
 
                           {/* Tombol: Pesanan Dibatalkan (Masuk Riwayat) */}
                           <button

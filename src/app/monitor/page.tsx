@@ -32,6 +32,7 @@ const statusKind = (status: string) => {
   if (["READY", "PESANAN SIAP"].includes(value)) return "ready";
   if (["COMPLETED", "PESANAN SUDAH DIAMBIL", "SUDAH DIAMBIL", "SELESAI"].includes(value)) return "completed";
   if (["CANCELED", "CANCELLED", "PESANAN DIBATALKAN", "DIBATALKAN"].includes(value)) return "canceled";
+  if (["PENDING_PAYMENT", "MENUNGGU PEMBAYARAN QRIS"].includes(value)) return "pendingPayment";
   return "processing";
 };
 
