@@ -7,7 +7,7 @@ import {
   Heart, Share2, X, ArrowLeft, LogOut, QrCode
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
-import { ref, onValue, set, push, update, query, orderByChild, equalTo } from "firebase/database";
+import { ref, onValue, set, push, update, remove, runTransaction, query, orderByChild, equalTo } from "firebase/database";
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 
 // ==============================================
@@ -49,6 +49,25 @@ const normalizeGooglePhotoUrl = (value?: string | null) => {
 const formatRp = (n: number) => "Rp. " + n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 const formatNumber = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
+const preparePublicProofImage = async (file: File): Promise<File> => {
+  // Draw through canvas to strip EXIF/GPS metadata before the photo is publicly uploaded.
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = objectUrl;
+    await image.decode();
+    const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Tidak dapat memproses foto.");
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Gagal memproses foto.")), "image/jpeg", 0.88));
+    return new File([blob], "bukti-qris.jpg", { type: "image/jpeg" });
+  } finally { URL.revokeObjectURL(objectUrl); }
+};
+
 const orderStatusKind = (status: string) => {
   const s = (status || "").trim().toUpperCase().replace(/\s+/g, " ");
   if (["COMPLETED", "PESANAN SUDAH DIAMBIL", "SUDAH DIAMBIL", "SELESAI"].includes(s)) return "completed";
@@ -89,6 +108,14 @@ export default function ShopPage() {
   const [orderType, setOrderType] = useState<"delivery"|"takeaway">("delivery");
   const [editProfile, setEditProfile] = useState({ phone: "", address: "" });
   const [qrisImageUrl, setQrisImageUrl] = useState("");
+  const [takeawayMapUrl, setTakeawayMapUrl] = useState("");
+  const [pickupAddress, setPickupAddress] = useState("");
+  const [qrisUniqueCode, setQrisUniqueCode] = useState(0);
+  const [qrisOrderId, setQrisOrderId] = useState("");
+  const [reservationDateKey, setReservationDateKey] = useState("");
+  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
+  const [paymentProofPreview, setPaymentProofPreview] = useState("");
+  const [publicProofConsent, setPublicProofConsent] = useState(false);
   const [isQrisOpen, setIsQrisOpen] = useState(false);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
@@ -150,9 +177,12 @@ export default function ShopPage() {
       setProducts(list);
     }, (error) => console.error("Gagal memuat produk Shop:", error));
 
-    const unsubPaymentSettings = onValue(ref(db, "publicPaymentSettings/qrisImageUrl"), (snap) => {
-      setQrisImageUrl(typeof snap.val() === "string" ? snap.val() : "");
-    }, (error) => console.error("Gagal memuat QRIS:", error));
+    const unsubPaymentSettings = onValue(ref(db, "publicPaymentSettings"), (snap) => {
+      const settings = snap.val() || {};
+      setQrisImageUrl(typeof settings.qrisImageUrl === "string" ? settings.qrisImageUrl : "");
+      setTakeawayMapUrl(typeof settings.takeawayMapUrl === "string" ? settings.takeawayMapUrl : "");
+      setPickupAddress(typeof settings.pickupAddress === "string" ? settings.pickupAddress : "");
+    }, (error) => console.error("Gagal memuat QRIS/lokasi toko:", error));
 
     let unsubOrders: (() => void) | undefined;
     if (user?.uid) {
@@ -247,60 +277,85 @@ export default function ShopPage() {
   const handleCheckout = async () => {
     if (!user) return alert("Login dulu untuk pesan!");
     if (cart.length === 0) return alert("Keranjang masih kosong.");
-
     const phone = editProfile.phone.trim() || user.phone?.trim() || "";
     const address = editProfile.address.trim() || user.address?.trim() || "";
     if (!phone || !address) {
       alert("Nomor WhatsApp dan alamat wajib diisi sebelum membuat pesanan.");
-      setActiveTab("settings");
-      return;
+      setActiveTab("settings"); return;
     }
-    if (!qrisImageUrl) {
-      alert("QRIS belum diatur oleh admin. Silakan hubungi toko.");
-      return;
-    }
-
+    if (!qrisImageUrl) return alert("QRIS belum diatur oleh admin. Silakan hubungi toko.");
     try {
-      await update(ref(db, `users/${user.uid}`), {
-        name: user.name, email: user.email, photoURL: user.photoURL,
-        phone, address, favorites
-      });
+      await update(ref(db, `users/${user.uid}`), { name: user.name, email: user.email, photoURL: user.photoURL, phone, address, favorites });
+      const orderRef = push(ref(db, "orders"));
+      const now = new Date();
+      const dateKey = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+      let reservedCode = 0;
+      for (let attempt = 0; attempt < 100 && !reservedCode; attempt++) {
+        const candidate = Math.floor(Math.random() * 499) + 1;
+        const reservationRef = ref(db, `qrisPaymentReservations/${dateKey}/${candidate}`);
+        try {
+          const result = await runTransaction(reservationRef, current => {
+            if (!current || (current.expiresAt || 0) < Date.now()) {
+              return { uid: user.uid, orderId: orderRef.key, createdAt: Date.now(), expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
+            }
+            return;
+          }, { applyLocally: false });
+          if (result.committed) reservedCode = candidate;
+        } catch (reservationError: any) {
+          // A rule intentionally hides other customers' reservation details; skip that code.
+          if (!String(reservationError?.code || reservationError?.message || "").includes("PERMISSION_DENIED")) throw reservationError;
+        }
+      }
+      if (!reservedCode) throw new Error("Kode unik hari ini sedang penuh. Coba lagi beberapa menit lagi.");
       setUser({ ...user, phone, address });
-      setIsQrisOpen(true);
-    } catch (error) {
-      console.error("Gagal menyimpan data pelanggan:", error);
-      alert("Data WhatsApp/alamat gagal disimpan. Periksa koneksi lalu coba lagi.");
+      setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(reservedCode);
+      setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false); setIsQrisOpen(true);
+    } catch (error: any) {
+      console.error("Gagal menyiapkan checkout:", error);
+      alert(error?.message?.includes("permission") ? "Gagal menyiapkan kode unik. Admin perlu menerbitkan Firebase Realtime Database Rules terbaru." : error?.message || "Data pelanggan/kode unik gagal disimpan.");
     }
   };
 
+  const closeQrisModal = async () => {
+    if (user?.uid && reservationDateKey && qrisUniqueCode && qrisOrderId) {
+      try { await remove(ref(db, `qrisPaymentReservations/${reservationDateKey}/${qrisUniqueCode}`)); } catch (error) { console.warn("Reservasi kode unik akan kedaluwarsa otomatis:", error); }
+    }
+    setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false);
+  };
+
   const submitQrisOrderForVerification = async () => {
-    if (!user || !qrisImageUrl || cart.length === 0 || isSubmittingOrder) return;
+    if (!user || !qrisImageUrl || cart.length === 0 || !paymentProofFile || !qrisOrderId || !qrisUniqueCode || isSubmittingOrder) {
+      if (!paymentProofFile) alert("Pilih foto bukti pembayaran terlebih dahulu.");
+      return;
+    }
+    if (!publicProofConsent) return alert("Setujui terlebih dahulu bahwa foto bukti akan tersimpan pada repo GitHub publik.");
+    if (!paymentProofFile.type.startsWith("image/") || paymentProofFile.size > 5 * 1024 * 1024) return alert("Pilih gambar maksimal 5 MB.");
     setIsSubmittingOrder(true);
-    const orderRef = push(ref(db, "orders"));
     try {
-      await set(orderRef, {
-        orderNumber: "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase(),
-        date: new Date().toLocaleString("id-ID"),
-        createdAt: Date.now(),
-        items: cart,
-        total: cartTotal,
-        source: "shop",
-        status: "PENDING_PAYMENT",
-        paymentStatus: "CUSTOMER_CLAIMS_PAID",
-        paymentMethod: "QRIS",
-        orderType,
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error("Sesi login berakhir. Silakan login ulang.");
+      const safePhoto = await preparePublicProofImage(paymentProofFile);
+      if (safePhoto.size > 5 * 1024 * 1024) throw new Error("Foto setelah diproses masih lebih dari 5 MB. Pilih foto yang lebih kecil.");
+      const form = new FormData(); form.set("proof", safePhoto); form.set("orderId", qrisOrderId); form.set("publicConsent", "true"); form.set("dateKey", reservationDateKey); form.set("uniqueCode", String(qrisUniqueCode));
+      const uploadEndpoint = process.env.NEXT_PUBLIC_PROOF_UPLOAD_URL;
+      if (!uploadEndpoint) throw new Error("URL Worker upload belum diatur. Admin perlu menambahkan NEXT_PUBLIC_PROOF_UPLOAD_URL di Cloudflare Pages.");
+      const uploadResponse = await fetch(uploadEndpoint, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      const uploadResult = await uploadResponse.json();
+      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "Unggah foto bukti gagal.");
+      const payableTotal = cartTotal + qrisUniqueCode;
+      await set(ref(db, `orders/${qrisOrderId}`), {
+        orderNumber: "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase(), date: new Date().toLocaleString("id-ID"), createdAt: Date.now(),
+        items: cart, subtotal: cartTotal, uniqueCode: qrisUniqueCode, total: payableTotal,
+        paymentProofUrl: uploadResult.url, paymentProofPath: uploadResult.path,
+        source: "shop", status: "PENDING_PAYMENT", paymentStatus: "CUSTOMER_CLAIMS_PAID", paymentMethod: "QRIS", orderType,
         customer: { uid: user.uid, name: user.name, phone: editProfile.phone.trim() || user.phone || "", address: editProfile.address.trim() || user.address || "" }
       });
-      setCart([]);
-      setIsQrisOpen(false);
-      setActiveTab("active");
-      alert("Pesanan tercatat dan menunggu admin memverifikasi pembayaran QRIS. Pesanan baru dikirim ke dapur setelah pembayaran dikonfirmasi.");
-    } catch (error) {
-      console.error("Gagal mengirim pesanan QRIS:", error);
-      alert("Pesanan gagal dikirim. Periksa koneksi lalu coba lagi.");
-    } finally {
-      setIsSubmittingOrder(false);
-    }
+      setCart([]); setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false); setActiveTab("active");
+      alert("Bukti pembayaran terkirim. Admin akan mencocokkan total belanja dan kode unik di aplikasi merchant.");
+    } catch (error: any) {
+      console.error("Gagal mengirim bukti/order QRIS:", error);
+      alert(error?.message || "Pesanan atau bukti gagal dikirim. Periksa koneksi lalu coba lagi.");
+    } finally { setIsSubmittingOrder(false); }
   };
 
   const toggleFavorite = (id: string) => {
@@ -627,6 +682,18 @@ export default function ShopPage() {
                       <button onClick={()=>setOrderType("delivery")} className={`flex-1 py-2 text-xs font-bold rounded-xl ${orderType==="delivery" ? "bg-orange-500 text-white shadow-md" : "text-slate-500 hover:bg-slate-200"}`}>Delivery (Antar)</button>
                       <button onClick={()=>setOrderType("takeaway")} className={`flex-1 py-2 text-xs font-bold rounded-xl ${orderType==="takeaway" ? "bg-orange-500 text-white shadow-md" : "text-slate-500 hover:bg-slate-200"}`}>Take Away (Ambil)</button>
                     </div>
+                    {orderType === "takeaway" ? (
+                      <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                        <p className="font-bold">Alamat pengambilan</p>
+                        <p className="mt-1">{pickupAddress || "Lokasi toko belum diatur admin."}</p>
+                        {takeawayMapUrl && <a href={takeawayMapUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex rounded-lg bg-emerald-700 px-3 py-2 font-bold text-white">Buka Google Maps</a>}
+                      </div>
+                    ) : (
+                      <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
+                        <p className="font-bold">Catatan biaya pengantaran</p>
+                        <p>Ongkos kirim driver merupakan biaya tambahan, tidak termasuk total QRIS makanan, dan dibayar terpisah kepada driver. Nominal mengikuti jarak/lokasi.</p>
+                      </div>
+                    )}
 
                     <div className="flex justify-between font-black text-base mb-5">
                       <span>Total Bayar</span>
@@ -778,19 +845,34 @@ export default function ShopPage() {
             <section className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
               <div className="mb-4 flex items-center justify-between">
                 <div><h2 className="text-lg font-black text-slate-900">Pembayaran QRIS</h2><p className="text-xs text-slate-500">Scan lalu bayar sesuai total pesanan</p></div>
-                <button onClick={() => setIsQrisOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500" aria-label="Tutup QRIS"><X size={18}/></button>
+                <button onClick={closeQrisModal} className="rounded-full bg-slate-100 p-2 text-slate-500" aria-label="Tutup QRIS"><X size={18}/></button>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Total yang harus dibayar</p>
-                <p className="mt-1 text-2xl font-black text-orange-600">{formatRp(cartTotal)}</p>
+                <p className="mt-1 text-2xl font-black text-orange-600">{formatRp(cartTotal + qrisUniqueCode)}</p>
+                <p className="mt-1 text-xs text-slate-600">Belanja {formatRp(cartTotal)} + kode unik {formatRp(qrisUniqueCode)}</p>
                 <img src={qrisImageUrl} alt="QRIS toko" referrerPolicy="no-referrer" className="mx-auto mt-4 aspect-square w-56 rounded-xl bg-white object-contain p-2" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
               </div>
               <div className="mt-4 space-y-2 rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
                 <p className="font-bold">Setelah membayar, tekan tombol konfirmasi di bawah.</p>
                 <p>Dengan QRIS statis, sistem tidak dapat mendeteksi pembayaran otomatis. Admin akan memeriksa transaksi di aplikasi merchant; pesanan baru dikirim ke dapur setelah admin mengonfirmasi.</p>
               </div>
-              <button onClick={submitQrisOrderForVerification} disabled={isSubmittingOrder} className="mt-4 w-full rounded-xl bg-emerald-600 py-3.5 text-sm font-black text-white disabled:opacity-50">
-                {isSubmittingOrder ? "Mengirim…" : "Saya Sudah Bayar — Kirim untuk Verifikasi"}
+              <div className="mt-4 rounded-xl border border-slate-200 p-3">
+                <label className="block text-xs font-bold text-slate-700">Unggah foto bukti pembayaran (wajib)</label>
+                <input type="file" accept="image/*" onChange={e => {
+                  const file = e.target.files?.[0] || null;
+                  setPaymentProofFile(file);
+                  setPaymentProofPreview(file ? URL.createObjectURL(file) : "");
+                }} className="mt-2 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-orange-100 file:px-3 file:py-2 file:font-bold file:text-orange-700" />
+                {paymentProofPreview && <img src={paymentProofPreview} alt="Pratinjau bukti pembayaran" className="mt-3 max-h-40 rounded-xl border object-contain" />}
+                <p className="mt-2 text-[10px] text-slate-500">JPG/PNG/WebP maksimal 5 MB. Unggah bukti yang sudah disamarkan jika berisi data pribadi.</p>
+              </div>
+              <label className="mt-3 flex gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-[10px] leading-relaxed text-rose-900">
+                <input type="checkbox" checked={publicProofConsent} onChange={e => setPublicProofConsent(e.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-rose-600" />
+                <span>Saya memahami foto bukti akan disimpan di GitHub publik dan bisa dilihat/diunduh siapa saja. Jangan unggah foto yang menampilkan PIN, saldo, nomor rekening, atau data pribadi.</span>
+              </label>
+              <button onClick={submitQrisOrderForVerification} disabled={isSubmittingOrder || !paymentProofFile || !publicProofConsent} className="mt-4 w-full rounded-xl bg-emerald-600 py-3.5 text-sm font-black text-white disabled:opacity-50">
+                {isSubmittingOrder ? "Mengunggah bukti…" : "Saya Sudah Bayar — Kirim Bukti untuk Verifikasi"}
               </button>
             </section>
           </div>

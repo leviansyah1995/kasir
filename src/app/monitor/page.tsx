@@ -20,6 +20,8 @@ type MonitorOrder = {
   createdAt: number;
   date: string;
   source: string;
+  sourceLabel?: string;
+  channel?: string;
   status: string;
   orderType?: string;
   total: number;
@@ -93,6 +95,8 @@ export default function MonitorPage() {
           createdAt: Number(order.createdAt || 0),
           date: order.date || "",
           source: order.source || "shop",
+          sourceLabel: order.sourceLabel || "",
+          channel: order.channel || "",
           status: order.status || "PROCESSING",
           orderType: order.orderType || "",
           total: Number(order.total || 0),
@@ -203,7 +207,7 @@ export default function MonitorPage() {
           </div>
         )}
         <div className="mt-4 flex items-center justify-between border-t border-black/10 pt-3 text-xs font-semibold text-slate-500">
-          <span>{order.source.toUpperCase()} {order.orderType ? `• ${order.orderType}` : ""}</span>
+          <span>{order.sourceLabel || order.channel?.toUpperCase() || order.source.toUpperCase()} {order.orderType ? `• ${order.orderType}` : ""}</span>
           <span>{order.date}</span>
         </div>
       </article>
