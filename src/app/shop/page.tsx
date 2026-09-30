@@ -7,7 +7,7 @@ import {
   Heart, Share2, X, ArrowLeft, LogOut
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
-import { ref, onValue, set, push, update } from "firebase/database";
+import { ref, onValue, set, push, update, query, orderByChild, equalTo } from "firebase/database";
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 
 // ==============================================
@@ -145,16 +145,23 @@ export default function ShopPage() {
       setProducts(list);
     }, (error) => console.error("Gagal memuat produk Shop:", error));
 
-    const unsubOrders = onValue(ref(db, "orders"), (snap) => {
-      if (snap.exists()) {
-        const data = snap.val();
-        setOrders(Object.keys(data).map(key => ({ id: key, ...data[key] })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
-      } else {
-        setOrders([]);
-      }
-    }, (error) => console.error("Gagal memuat pesanan Shop:", error));
+    let unsubOrders: (() => void) | undefined;
+    if (user?.uid) {
+      // Hanya ambil pesanan milik user yang login; jangan unduh seluruh node orders.
+      const ownOrdersQuery = query(ref(db, "orders"), orderByChild("customer/uid"), equalTo(user.uid));
+      unsubOrders = onValue(ownOrdersQuery, (snap) => {
+        if (snap.exists()) {
+          const data = snap.val();
+          setOrders(Object.keys(data).map(key => ({ id: key, ...data[key] })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+        } else {
+          setOrders([]);
+        }
+      }, (error) => console.error("Gagal memuat pesanan Shop:", error));
+    } else {
+      setOrders([]);
+    }
 
-    return () => { unsubProducts(); unsubOrders(); };
+    return () => { unsubProducts(); unsubOrders?.(); };
   }, [user?.uid]);
 
   useEffect(() => {

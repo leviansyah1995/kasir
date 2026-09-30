@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BellRing, CheckCircle2, Clock3, Monitor, Volume2, VolumeX } from "lucide-react";
+import { BellRing, CheckCircle2, Clock3, LogIn, LogOut, Monitor, Volume2, VolumeX } from "lucide-react";
 import { onValue, ref } from "firebase/database";
-import { db } from "../../lib/firebase";
+import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { auth, db } from "../../lib/firebase";
 
 type MonitorOrderItem = {
   name?: string;
@@ -34,10 +35,14 @@ const statusKind = (status: string) => {
   return "processing";
 };
 
+const ADMIN_EMAIL = "dianarifin.shopeedriver@gmail.com";
 const formatClock = (date: Date) => date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 export default function MonitorPage() {
   const [orders, setOrders] = useState<MonitorOrder[]>([]);
+  const [adminUser, setAdminUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
   const [loading, setLoading] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [clock, setClock] = useState(new Date());
@@ -46,11 +51,37 @@ export default function MonitorPage() {
   const firstSnapshotRef = useRef(true);
 
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setAuthLoading(false);
+      if (user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() && user.emailVerified) {
+        setAdminUser(user);
+        setAuthError("");
+        return;
+      }
+      setAdminUser(null);
+      if (user) {
+        setAuthError("Akses monitor hanya untuk akun admin yang terdaftar.");
+        await signOut(auth);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
+    if (!adminUser) {
+      setOrders([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    previousStatusRef.current = {};
+    firstSnapshotRef.current = true;
+
     const unsubscribe = onValue(ref(db, "orders"), (snapshot) => {
       const value = snapshot.val() || {};
       const next: MonitorOrder[] = Object.entries(value).map(([id, raw]) => {
@@ -89,7 +120,7 @@ export default function MonitorPage() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [adminUser]);
 
   const announceReady = (order: MonitorOrder) => {
     if (!soundEnabledRef.current || typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -124,6 +155,15 @@ export default function MonitorPage() {
     soundEnabledRef.current = false;
     setSoundEnabled(false);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  };
+
+  const handleAdminLogin = async () => {
+    setAuthError("");
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (error: any) {
+      setAuthError(error?.message || "Gagal masuk dengan Google.");
+    }
   };
 
   const processingOrders = orders.filter(order => statusKind(order.status) === "processing");
@@ -169,6 +209,24 @@ export default function MonitorPage() {
     );
   };
 
+  if (authLoading) {
+    return <main className="flex min-h-screen items-center justify-center bg-[#0b1220] text-white">Memeriksa akses monitor…</main>;
+  }
+
+  if (!adminUser) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#0b1220] p-6 text-white">
+        <section className="w-full max-w-md rounded-3xl border border-white/10 bg-[#111b2d] p-8 text-center shadow-2xl">
+          <Monitor className="mx-auto mb-4 text-blue-300" size={38} />
+          <h1 className="text-2xl font-black">Monitor Antrean</h1>
+          <p className="mt-2 text-sm text-slate-400">Masuk dengan akun admin untuk membuka monitor pesanan.</p>
+          {authError && <p className="mt-4 rounded-xl bg-red-500/10 p-3 text-sm text-red-300">{authError}</p>}
+          <button onClick={handleAdminLogin} className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3 font-bold text-slate-900 hover:bg-slate-100"><LogIn size={18}/> Masuk dengan Google</button>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-[#0b1220] text-white">
       <header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 bg-[#111b2d] px-8 py-5">
@@ -189,6 +247,7 @@ export default function MonitorPage() {
           ) : (
             <button onClick={enableSound} className="flex items-center gap-2 rounded-xl bg-amber-400 px-4 py-3 text-sm font-black text-slate-950 hover:bg-amber-300" title="Aktifkan suara pengumuman"><VolumeX size={18}/> Aktifkan suara</button>
           )}
+          <button onClick={() => signOut(auth)} className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-3 text-xs font-bold text-slate-300 hover:bg-white/5" title="Keluar dari monitor"><LogOut size={16}/><span className="hidden 2xl:inline">Keluar</span></button>
         </div>
       </header>
 
