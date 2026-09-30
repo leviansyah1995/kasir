@@ -1,0 +1,11 @@
+name = "kasir-payment-proof"
+main = "src/index.ts"
+compatibility_date = "2026-09-29"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGIN = "https://leviankitchen.pages.dev"
+FIREBASE_API_KEY = "AIzaSyBmhKCv64j6UugxMEFgYidSi68YH70illg"
+FIREBASE_DATABASE_URL = "https://realtime-database-11f5b-default-rtdb.firebaseio.com"
+GITHUB_PROOF_BRANCH = "main"
+GITHUB_PROOF_REPO = "leviansyah1995/gambar"

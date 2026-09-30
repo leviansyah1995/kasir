@@ -49,8 +49,8 @@ const normalizeGooglePhotoUrl = (value?: string | null) => {
 const formatRp = (n: number) => "Rp. " + n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 const formatNumber = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
-const preparePublicProofImage = async (file: File): Promise<File> => {
-  // Draw through canvas to strip EXIF/GPS metadata before the photo is publicly uploaded.
+const prepareProofImage = async (file: File): Promise<File> => {
+  // Draw through canvas to strip EXIF/GPS metadata before the photo is uploaded privately.
   const objectUrl = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -115,7 +115,6 @@ export default function ShopPage() {
   const [reservationDateKey, setReservationDateKey] = useState("");
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
   const [paymentProofPreview, setPaymentProofPreview] = useState("");
-  const [publicProofConsent, setPublicProofConsent] = useState(false);
   const [isQrisOpen, setIsQrisOpen] = useState(false);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
@@ -309,7 +308,7 @@ export default function ShopPage() {
       if (!reservedCode) throw new Error("Kode unik hari ini sedang penuh. Coba lagi beberapa menit lagi.");
       setUser({ ...user, phone, address });
       setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(reservedCode);
-      setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false); setIsQrisOpen(true);
+      setPaymentProofFile(null); setPaymentProofPreview(""); setIsQrisOpen(true);
     } catch (error: any) {
       console.error("Gagal menyiapkan checkout:", error);
       alert(error?.message?.includes("permission") ? "Gagal menyiapkan kode unik. Admin perlu menerbitkan Firebase Realtime Database Rules terbaru." : error?.message || "Data pelanggan/kode unik gagal disimpan.");
@@ -320,7 +319,7 @@ export default function ShopPage() {
     if (user?.uid && reservationDateKey && qrisUniqueCode && qrisOrderId) {
       try { await remove(ref(db, `qrisPaymentReservations/${reservationDateKey}/${qrisUniqueCode}`)); } catch (error) { console.warn("Reservasi kode unik akan kedaluwarsa otomatis:", error); }
     }
-    setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false);
+    setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview("");
   };
 
   const submitQrisOrderForVerification = async () => {
@@ -328,29 +327,28 @@ export default function ShopPage() {
       if (!paymentProofFile) alert("Pilih foto bukti pembayaran terlebih dahulu.");
       return;
     }
-    if (!publicProofConsent) return alert("Setujui terlebih dahulu bahwa foto bukti akan tersimpan pada repo GitHub publik.");
     if (!paymentProofFile.type.startsWith("image/") || paymentProofFile.size > 5 * 1024 * 1024) return alert("Pilih gambar maksimal 5 MB.");
     setIsSubmittingOrder(true);
     try {
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error("Sesi login berakhir. Silakan login ulang.");
-      const safePhoto = await preparePublicProofImage(paymentProofFile);
+      const safePhoto = await prepareProofImage(paymentProofFile);
       if (safePhoto.size > 5 * 1024 * 1024) throw new Error("Foto setelah diproses masih lebih dari 5 MB. Pilih foto yang lebih kecil.");
-      const form = new FormData(); form.set("proof", safePhoto); form.set("orderId", qrisOrderId); form.set("publicConsent", "true"); form.set("dateKey", reservationDateKey); form.set("uniqueCode", String(qrisUniqueCode));
+      const form = new FormData(); form.set("proof", safePhoto); form.set("orderId", qrisOrderId); form.set("dateKey", reservationDateKey); form.set("uniqueCode", String(qrisUniqueCode));
       const uploadEndpoint = process.env.NEXT_PUBLIC_PROOF_UPLOAD_URL;
       if (!uploadEndpoint) throw new Error("URL Worker upload belum diatur. Admin perlu menambahkan NEXT_PUBLIC_PROOF_UPLOAD_URL di Cloudflare Pages.");
       const uploadResponse = await fetch(uploadEndpoint, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
       const uploadResult = await uploadResponse.json();
-      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "Unggah foto bukti gagal.");
+      if (!uploadResponse.ok || !uploadResult.path) throw new Error(uploadResult.error || "Unggah foto bukti privat gagal.");
       const payableTotal = cartTotal + qrisUniqueCode;
       await set(ref(db, `orders/${qrisOrderId}`), {
         orderNumber: "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase(), date: new Date().toLocaleString("id-ID"), createdAt: Date.now(),
         items: cart, subtotal: cartTotal, uniqueCode: qrisUniqueCode, total: payableTotal,
-        paymentProofUrl: uploadResult.url, paymentProofPath: uploadResult.path,
+        paymentProofPath: uploadResult.path,
         source: "shop", status: "PENDING_PAYMENT", paymentStatus: "CUSTOMER_CLAIMS_PAID", paymentMethod: "QRIS", orderType,
         customer: { uid: user.uid, name: user.name, phone: editProfile.phone.trim() || user.phone || "", address: editProfile.address.trim() || user.address || "" }
       });
-      setCart([]); setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setPublicProofConsent(false); setActiveTab("active");
+      setCart([]); setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setActiveTab("active");
       alert("Bukti pembayaran terkirim. Admin akan mencocokkan total belanja dan kode unik di aplikasi merchant.");
     } catch (error: any) {
       console.error("Gagal mengirim bukti/order QRIS:", error);
@@ -566,8 +564,9 @@ export default function ShopPage() {
             )}
           </nav>
           
-          <button onClick={() => setActiveTab("cart")} className={`relative p-3 mt-4 rounded-2xl transition-all shadow-md ${activeTab==="cart" ? "bg-orange-500 text-white" : "bg-orange-100 text-orange-600"}`}>
+          <button onClick={() => setActiveTab("cart")} aria-label={cartCount > 0 ? "Pesan Sekarang" : "Keranjang"} className={`relative mt-4 flex flex-col items-center gap-1 rounded-2xl px-1.5 py-2 transition-all shadow-md ${activeTab==="cart" ? "bg-orange-500 text-white" : "bg-orange-100 text-orange-600"}`}>
             <ShoppingBasket size={22} />
+            <span className="w-[60px] text-center text-[8px] font-black leading-tight">{cartCount > 0 ? "Pesan Sekarang" : "Keranjang"}</span>
             {cartCount > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white">{cartCount}</span>}
           </button>
         </aside>
@@ -702,7 +701,7 @@ export default function ShopPage() {
                     {!user ? (
                       <button onClick={handleLogin} className="w-full py-3.5 bg-slate-800 text-white rounded-2xl font-bold text-sm hover:bg-slate-900 transition-colors">Login untuk Pesan</button>
                     ) : (
-                      <button onClick={handleCheckout} className="w-full py-3.5 bg-orange-500 text-white rounded-2xl font-bold text-sm shadow-lg shadow-orange-500/30 hover:bg-orange-600 transition-all active:scale-95">Lanjut Pembayaran QRIS</button>
+                      <button onClick={handleCheckout} className="w-full py-3.5 bg-orange-500 text-white rounded-2xl font-bold text-sm shadow-lg shadow-orange-500/30 hover:bg-orange-600 transition-all active:scale-95">Pesan Sekarang — Lanjut Pembayaran QRIS</button>
                     )}
                   </div>
                 </div>
@@ -865,13 +864,13 @@ export default function ShopPage() {
                   setPaymentProofPreview(file ? URL.createObjectURL(file) : "");
                 }} className="mt-2 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-orange-100 file:px-3 file:py-2 file:font-bold file:text-orange-700" />
                 {paymentProofPreview && <img src={paymentProofPreview} alt="Pratinjau bukti pembayaran" className="mt-3 max-h-40 rounded-xl border object-contain" />}
-                <p className="mt-2 text-[10px] text-slate-500">JPG/PNG/WebP maksimal 5 MB. Unggah bukti yang sudah disamarkan jika berisi data pribadi.</p>
+                <div className="mt-2 space-y-1 text-[10px] leading-relaxed text-slate-500">
+                  <p>JPG/PNG/WebP maksimal 5 MB. Unggah foto bukti pembayaran saja; jangan unggah kata sandi, OTP, atau data rahasia.</p>
+                  <span>Saya memahami foto bukti akan disimpan. Jangan unggah foto yang menampilkan PIN, saldo, nomor rekening, atau data pribadi.</span>
+                  <p>Bukti disimpan privat dan hanya dapat dilihat admin terotorisasi.</p>
+                </div>
               </div>
-              <label className="mt-3 flex gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-[10px] leading-relaxed text-rose-900">
-                <input type="checkbox" checked={publicProofConsent} onChange={e => setPublicProofConsent(e.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-rose-600" />
-                <span>Saya memahami foto bukti akan disimpan di GitHub publik dan bisa dilihat/diunduh siapa saja. Jangan unggah foto yang menampilkan PIN, saldo, nomor rekening, atau data pribadi.</span>
-              </label>
-              <button onClick={submitQrisOrderForVerification} disabled={isSubmittingOrder || !paymentProofFile || !publicProofConsent} className="mt-4 w-full rounded-xl bg-emerald-600 py-3.5 text-sm font-black text-white disabled:opacity-50">
+              <button onClick={submitQrisOrderForVerification} disabled={isSubmittingOrder || !paymentProofFile} className="mt-4 w-full rounded-xl bg-emerald-600 py-3.5 text-sm font-black text-white disabled:opacity-50">
                 {isSubmittingOrder ? "Mengunggah bukti…" : "Saya Sudah Bayar — Kirim Bukti untuk Verifikasi"}
               </button>
             </section>

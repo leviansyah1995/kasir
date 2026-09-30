@@ -52,6 +52,9 @@ export default function MonitorPage() {
   const soundEnabledRef = useRef(false);
   const previousStatusRef = useRef<Record<string, string>>({});
   const firstSnapshotRef = useRef(true);
+  const processingScrollRef = useRef<HTMLDivElement | null>(null);
+  const readyScrollRef = useRef<HTMLDivElement | null>(null);
+  const completedScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -173,7 +176,31 @@ export default function MonitorPage() {
 
   const processingOrders = orders.filter(order => statusKind(order.status) === "processing");
   const readyOrders = orders.filter(order => statusKind(order.status) === "ready");
-  const pickedUpOrders = orders.filter(order => statusKind(order.status) === "completed").slice(-12).reverse();
+  const completedOrderCount = orders.filter(order => statusKind(order.status) === "completed").length;
+  const pickedUpOrders = orders.filter(order => statusKind(order.status) === "completed").slice(-50).reverse();
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      const lists = [
+        { ref: processingScrollRef, count: processingOrders.length },
+        { ref: readyScrollRef, count: readyOrders.length },
+        { ref: completedScrollRef, count: pickedUpOrders.length },
+      ];
+      for (const list of lists) {
+        const element = list.ref.current;
+        if (!element || list.count <= 10 || element.matches(":hover")) continue;
+        const maxScroll = element.scrollHeight - element.clientHeight;
+        if (maxScroll <= 2) continue;
+        const direction = Number(element.dataset.scrollDirection || "1");
+        let next = element.scrollTop + direction * 0.5;
+        if (next >= maxScroll) { next = maxScroll; element.dataset.scrollDirection = "-1"; }
+        else if (next <= 0) { next = 0; element.dataset.scrollDirection = "1"; }
+        element.scrollTop = next;
+      }
+    }, 40);
+    return () => window.clearInterval(timer);
+  }, [processingOrders.length, readyOrders.length, pickedUpOrders.length]);
 
   const orderCard = (order: MonitorOrder, type: "processing" | "ready" | "completed") => {
     const styles = {
@@ -182,33 +209,18 @@ export default function MonitorPage() {
       completed: { border: "border-slate-200", bg: "bg-white", tag: "bg-slate-100 text-slate-600", label: "SUDAH DIAMBIL" }
     }[type];
     return (
-      <article key={order.id} className={`rounded-2xl border-2 ${styles.border} ${styles.bg} p-5 shadow-sm ${type === "ready" ? "ring-2 ring-emerald-200" : ""}`}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Nomor pesanan</p>
-            <h3 className="mt-1 truncate font-mono text-2xl font-black text-slate-900">{order.orderNumber}</h3>
-          </div>
-          <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-black tracking-wide ${styles.tag}`}>{styles.label}</span>
+      <article key={order.id} className={`flex h-[56px] min-h-[56px] flex-col justify-between overflow-hidden rounded-lg border ${styles.border} ${styles.bg} p-1.5 shadow-sm ${type === "ready" ? "ring-1 ring-emerald-200" : ""}`}>
+        <div className="flex min-w-0 items-center gap-1.5 leading-none">
+          <h3 className="shrink-0 font-mono text-xs font-black text-slate-900">{order.orderNumber}</h3>
+          <span className="min-w-0 flex-1 truncate text-[9px] font-bold text-slate-800">{order.customer?.name?.trim() || "Pelanggan"}</span>
+          <span className={`shrink-0 rounded-full px-1.5 py-1 text-[7px] font-black tracking-wide ${styles.tag}`}>{styles.label}</span>
         </div>
-        <div className="mt-4 border-t border-black/10 pt-3">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Nama</p>
-          <p className="mt-1 truncate text-xl font-extrabold text-slate-900">{order.customer?.name?.trim() || "Pelanggan"}</p>
+        <div className="truncate text-[9px] leading-none text-slate-700">
+          {type !== "completed" && order.items.length > 0 ? <>{order.items.slice(0, 2).map((item, index) => <span key={`${order.id}-${index}`} className="mr-2 font-semibold">{item.qty || 1}× {item.name || "Menu"}{item.selectedVariants?.length ? ` (${item.selectedVariants.join(" + ")})` : ""}</span>)}{order.items.length > 2 && <span className="text-slate-500">+{order.items.length - 2} menu</span>}</> : <span className="text-slate-500">{type === "completed" ? "Pesanan selesai" : order.orderType || "Pesanan"}</span>}
         </div>
-        {type !== "completed" && order.items.length > 0 && (
-          <div className="mt-3 space-y-1 border-t border-black/10 pt-3">
-            {order.items.map((item, index) => (
-              <div key={`${order.id}-${index}`} className="text-sm text-slate-700">
-                <span className="font-bold">{item.qty || 1}× {item.name || "Menu"}</span>
-                {item.selectedVariants?.length ? <span className="ml-2 text-xs text-slate-600">({item.selectedVariants.join(" + ")})</span> : null}
-                {item.cookingMethod ? <span className="ml-2 text-xs text-slate-600">• {item.cookingMethod}</span> : null}
-                {item.note?.trim() ? <p className="ml-5 text-xs text-slate-500">Catatan: {item.note}</p> : null}
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="mt-4 flex items-center justify-between border-t border-black/10 pt-3 text-xs font-semibold text-slate-500">
-          <span>{order.sourceLabel || order.channel?.toUpperCase() || order.source.toUpperCase()} {order.orderType ? `• ${order.orderType}` : ""}</span>
-          <span>{order.date}</span>
+        <div className="flex items-center justify-between gap-1 text-[8px] font-semibold leading-none text-slate-500">
+          <span className="truncate">{order.sourceLabel || order.channel?.toUpperCase() || order.source.toUpperCase()} {order.orderType ? `• ${order.orderType}` : ""}</span>
+          <span className="shrink-0">{order.date}</span>
         </div>
       </article>
     );
@@ -264,7 +276,7 @@ export default function MonitorPage() {
             <div className="flex items-center gap-3"><div className="rounded-xl bg-sky-400/15 p-2.5 text-sky-300"><Clock3 size={22}/></div><div><h2 className="text-xl font-black">Sedang Diproses</h2><p className="text-xs text-slate-400">Pesanan masuk ke dapur</p></div></div>
             <span className="rounded-full bg-sky-400 px-3 py-1 text-sm font-black text-slate-950">{processingOrders.length}</span>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1">
+          <div ref={processingScrollRef} style={{ height: "min(560px, calc(100vh - 180px))" }} className="grid content-start gap-2 overflow-y-auto pr-1 ">
             {loading ? <p className="py-8 text-center text-slate-400">Memuat pesanan…</p> : processingOrders.length ? processingOrders.map(order => orderCard(order, "processing")) : <p className="rounded-2xl border border-dashed border-white/15 px-4 py-10 text-center text-slate-500">Tidak ada pesanan yang sedang diproses</p>}
           </div>
         </div>
@@ -274,17 +286,17 @@ export default function MonitorPage() {
             <div className="flex items-center gap-3"><div className="rounded-xl bg-emerald-400/15 p-2.5 text-emerald-300"><CheckCircle2 size={22}/></div><div><h2 className="text-xl font-black">Siap Diambil</h2><p className="text-xs text-slate-400">Silakan menuju kasir</p></div></div>
             <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-black text-slate-950">{readyOrders.length}</span>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1">
+          <div ref={readyScrollRef} style={{ height: "min(560px, calc(100vh - 180px))" }} className="grid content-start gap-2 overflow-y-auto pr-1 ">
             {loading ? <p className="py-8 text-center text-slate-400">Memuat pesanan…</p> : readyOrders.length ? readyOrders.map(order => orderCard(order, "ready")) : <p className="rounded-2xl border border-dashed border-white/15 px-4 py-10 text-center text-slate-500">Belum ada pesanan siap diambil</p>}
           </div>
         </div>
 
         <div className="rounded-3xl border border-white/10 bg-[#111b2d] p-5">
           <div className="mb-5 flex items-center justify-between border-b border-white/10 pb-4">
-            <div className="flex items-center gap-3"><div className="rounded-xl bg-slate-400/15 p-2.5 text-slate-300"><CheckCircle2 size={22}/></div><div><h2 className="text-xl font-black">Sudah Diambil</h2><p className="text-xs text-slate-400">Pesanan terbaru yang selesai</p></div></div>
-            <span className="rounded-full bg-slate-600 px-3 py-1 text-sm font-black text-white">{pickedUpOrders.length}</span>
+            <div className="flex items-center gap-3"><div className="rounded-xl bg-slate-400/15 p-2.5 text-slate-300"><CheckCircle2 size={22}/></div><div><h2 className="text-xl font-black">Sudah Diambil</h2><p className="text-xs text-slate-400">Total pesanan selesai: {completedOrderCount}</p></div></div>
+            <span className="rounded-full bg-slate-600 px-3 py-1 text-sm font-black text-white">{completedOrderCount}</span>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1">
+          <div ref={completedScrollRef} style={{ height: "min(560px, calc(100vh - 180px))" }} className="grid content-start gap-2 overflow-y-auto pr-1 ">
             {loading ? <p className="py-8 text-center text-slate-400">Memuat pesanan…</p> : pickedUpOrders.length ? pickedUpOrders.map(order => orderCard(order, "completed")) : <p className="rounded-2xl border border-dashed border-white/15 px-4 py-10 text-center text-slate-500">Belum ada pesanan yang diambil</p>}
           </div>
         </div>

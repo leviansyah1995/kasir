@@ -41,7 +41,6 @@ interface Order {
   total: number;
   paymentMethod?: string;
   paymentStatus?: string;
-  paymentProofUrl?: string;
   paymentProofPath?: string;
   uniqueCode?: number;
   subtotal?: number;
@@ -92,29 +91,35 @@ const statusMessageText = (status: string) => ({
 
 const playDefaultBeep = () => {
   try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const now = ctx.currentTime;
-    const osc1 = ctx.createOscillator();
-    const gain1 = ctx.createGain();
-    osc1.type = "sine";
-    osc1.frequency.setValueAtTime(587.33, now);
-    gain1.gain.setValueAtTime(0.3, now);
-    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-    osc1.connect(gain1);
-    gain1.connect(ctx.destination);
-    osc1.start(now);
-    osc1.stop(now + 0.45);
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioContextClass();
+    const play = () => {
+      const now = ctx.currentTime;
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(587.33, now);
+      gain1.gain.setValueAtTime(0.3, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.45);
 
-    const osc2 = ctx.createOscillator();
-    const gain2 = ctx.createGain();
-    osc2.type = "sine";
-    osc2.frequency.setValueAtTime(880, now + 0.12);
-    gain2.gain.setValueAtTime(0.35, now + 0.12);
-    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-    osc2.connect(gain2);
-    gain2.connect(ctx.destination);
-    osc2.start(now + 0.12);
-    osc2.stop(now + 0.7);
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(880, now + 0.12);
+      gain2.gain.setValueAtTime(0.35, now + 0.12);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.start(now + 0.12);
+      osc2.stop(now + 0.7);
+      window.setTimeout(() => { void ctx.close().catch(() => {}); }, 1000);
+    };
+    if (ctx.state === "suspended") void ctx.resume().then(play).catch(error => console.error("Audio resume error:", error));
+    else play();
   } catch (e) {
     console.error("Audio error:", e);
   }
@@ -133,7 +138,11 @@ export default function OrderPage() {
   // Orders State (Firebase)
   const [orders, setOrders] = useState<Order[]>([]);
   const orderStatusCache = useRef<Map<string, string>>(new Map());
+  const notifiedOrderIds = useRef<Set<string>>(new Set());
   const [proofPreviewUrl, setProofPreviewUrl] = useState<string | null>(null);
+  const [proofImageUrls, setProofImageUrls] = useState<Record<string, string>>({});
+  const loadedProofPaths = useRef<Set<string>>(new Set());
+  const proofObjectUrls = useRef<Map<string, string>>(new Map());
 
   // Users State (Firebase)
   const [shopUsers, setShopUsers] = useState<ShopUser[]>([]);
@@ -189,6 +198,9 @@ export default function OrderPage() {
     if (!authUser) return;
 
     orderStatusCache.current = new Map();
+    try {
+      notifiedOrderIds.current = new Set(JSON.parse(sessionStorage.getItem("order_notified_ids") || "[]"));
+    } catch { notifiedOrderIds.current = new Set(); }
     let initialLoaded = false;
     const unsubOrders = onValue(ref(db, "orders"), (snap) => {
       if (snap.exists()) {
@@ -204,7 +216,6 @@ export default function OrderPage() {
           status: val[k].status || "PROCESSING",
           orderType: val[k].orderType || "takeaway",
           customer: val[k].customer || {},
-          paymentProofUrl: val[k].paymentProofUrl || "",
           paymentProofPath: val[k].paymentProofPath || "",
           uniqueCode: Number(val[k].uniqueCode || 0),
           subtotal: Number(val[k].subtotal ?? val[k].total ?? 0),
@@ -215,13 +226,14 @@ export default function OrderPage() {
         loaded.sort((a, b) => b.createdAt - a.createdAt);
         setOrders(loaded);
         const previous = orderStatusCache.current;
-        const newlyArrived = loaded.filter(o => {
-          const kind = statusKind(o.status);
-          return (!previous.has(o.id) && ["pendingPayment", "processing"].includes(kind)) || (kind === "pendingPayment" && previous.get(o.id) !== o.status);
-        });
-        if (initialLoaded && newlyArrived.length > 0) {
+        const pendingUnheard = loaded.filter(o => statusKind(o.status) === "pendingPayment" && !notifiedOrderIds.current.has(o.id));
+        const newProcessing = initialLoaded ? loaded.filter(o => statusKind(o.status) === "processing" && !previous.has(o.id) && !notifiedOrderIds.current.has(o.id)) : [];
+        const newlyArrived = [...pendingUnheard, ...newProcessing];
+        if (newlyArrived.length > 0) {
           triggerNotificationSound();
-          showToast(newlyArrived.some(o => statusKind(o.status) === "pendingPayment") ? "Bukti pembayaran QRIS baru menunggu verifikasi!" : "Pesanan baru masuk!");
+          showToast(pendingUnheard.length > 0 ? `Ada ${pendingUnheard.length} order menunggu verifikasi pembayaran!` : "Pesanan baru masuk!");
+          newlyArrived.forEach(o => notifiedOrderIds.current.add(o.id));
+          try { sessionStorage.setItem("order_notified_ids", JSON.stringify([...notifiedOrderIds.current])); } catch {}
         }
         orderStatusCache.current = new Map(loaded.map(o => [o.id, o.status]));
         initialLoaded = true;
@@ -254,6 +266,43 @@ export default function OrderPage() {
       unsubUsers();
     };
   }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser || !orders.length) return;
+    const endpoint = process.env.NEXT_PUBLIC_PROOF_UPLOAD_URL;
+    const requests = orders.filter(order => statusKind(order.status) === "pendingPayment" && order.paymentProofPath && !loadedProofPaths.current.has(order.paymentProofPath));
+    if (!endpoint || !requests.length) return;
+    let active = true;
+    const loadPrivateProofs = async () => {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const token = await currentUser.getIdToken();
+      for (const order of requests) {
+        const path = order.paymentProofPath;
+        if (!path) continue;
+        try {
+          const response = await fetch(`${endpoint}?path=${encodeURIComponent(path)}`, { headers: { Authorization: `Bearer ${token}` } });
+          if (!response.ok) {
+            console.error("Private proof preview failed", response.status, await response.text());
+            continue;
+          }
+          const objectUrl = URL.createObjectURL(await response.blob());
+          if (active) {
+            loadedProofPaths.current.add(path);
+            proofObjectUrls.current.set(path, objectUrl);
+            setProofImageUrls(current => ({ ...current, [order.id]: objectUrl }));
+          } else URL.revokeObjectURL(objectUrl);
+        } catch (error) { console.error("Private proof preview failed", error); }
+      }
+    };
+    void loadPrivateProofs();
+    return () => { active = false; };
+  }, [authUser, orders]);
+
+  useEffect(() => () => {
+    proofObjectUrls.current.forEach(url => URL.revokeObjectURL(url));
+    proofObjectUrls.current.clear();
+  }, []);
 
   const triggerNotificationSound = () => {
     if (!soundEnabled) return;
@@ -626,8 +675,10 @@ export default function OrderPage() {
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => {
-                setSoundEnabled(!soundEnabled);
-                showToast(soundEnabled ? "Suara dinonaktifkan" : "Suara aktif");
+                const nextEnabled = !soundEnabled;
+                setSoundEnabled(nextEnabled);
+                if (nextEnabled) playDefaultBeep();
+                showToast(nextEnabled ? "Suara aktif (tes notifikasi)" : "Suara dinonaktifkan");
               }}
               className={`p-2 rounded-xl border text-xs ${
                 soundEnabled 
@@ -772,7 +823,7 @@ export default function OrderPage() {
                           {statusKind(order.status) === "pendingPayment" ? (
                             <div className="col-span-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
                               <p className="text-xs leading-relaxed text-amber-900">Pelanggan mengaku sudah membayar QRIS. Cocokkan nominal total + kode unik di aplikasi merchant terlebih dahulu.</p>
-                              {order.paymentProofUrl && <button type="button" onClick={() => setProofPreviewUrl(order.paymentProofUrl || null)} className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white p-2 text-left"><img src={order.paymentProofUrl} alt="Bukti pembayaran" className="h-14 w-14 rounded-md object-cover"/><span className="text-[11px] font-bold text-amber-900">Lihat foto bukti<br/>Total: {formatRp(order.total)} {order.uniqueCode ? `• Kode ${formatRp(order.uniqueCode)}` : ""}</span></button>}
+                              {order.paymentProofPath && (proofImageUrls[order.id] ? <button type="button" onClick={() => setProofPreviewUrl(proofImageUrls[order.id])} className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white p-2 text-left"><img src={proofImageUrls[order.id]} alt="Bukti pembayaran privat" className="h-14 w-14 rounded-md object-cover"/><span className="text-[11px] font-bold text-amber-900">Lihat foto bukti<br/>Total: {formatRp(order.total)} {order.uniqueCode ? `• Kode ${formatRp(order.uniqueCode)}` : ""}</span></button> : <span className="text-[10px] text-amber-800">Memuat bukti pembayaran privat…</span>)}
                               <button onClick={() => confirmQrisPayment(order)} className="w-full rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-black text-white hover:bg-emerald-700">Pembayaran Terverifikasi — Kirim ke Dapur</button>
                             </div>
                           ) : (
