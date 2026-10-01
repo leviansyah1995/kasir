@@ -130,10 +130,20 @@ export default function ShopPage() {
     const timeout = window.setTimeout(() => controller.abort(), 5000);
     try {
       const response = await fetch(`/connection-check.txt?__connectivity_check=${Date.now()}`, { cache: "no-store", signal: controller.signal });
-      setIsOnline(response.ok);
-      void response.body?.cancel();
-    } catch { setIsOnline(false); }
-    finally { window.clearTimeout(timeout); setIsCheckingNetwork(false); }
+      if (response.ok) {
+        setIsOnline(true);
+        void response.body?.cancel();
+        return;
+      }
+      // Fallback agar tidak salah menampilkan halaman offline bila file probe belum ikut terdeploy.
+      const pageResponse = await fetch(`/shop?__connectivity_check=${Date.now()}`, { method: "HEAD", cache: "no-store", signal: controller.signal });
+      setIsOnline(pageResponse.ok);
+    } catch {
+      try {
+        const pageResponse = await fetch(`/shop?__connectivity_check=${Date.now()}`, { method: "HEAD", cache: "no-store" });
+        setIsOnline(pageResponse.ok);
+      } catch { setIsOnline(false); }
+    } finally { window.clearTimeout(timeout); setIsCheckingNetwork(false); }
   };
 
   useEffect(() => {
