@@ -153,6 +153,7 @@ export default function OrderPage() {
 
   // Sound Notification
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const soundEnabledRef = useRef(true);
   const [customAudioData, setCustomAudioData] = useState<string | null>(null);
   const [customAudioName, setCustomAudioName] = useState<string>("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -168,6 +169,8 @@ export default function OrderPage() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
+
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
   // 1. Auth Observer (Tanpa Redirect Otomatis ke Shop saat Logout)
   useEffect(() => {
@@ -309,7 +312,8 @@ export default function OrderPage() {
   }, []);
 
   const triggerNotificationSound = () => {
-    if (!soundEnabled) return;
+    if (!soundEnabledRef.current) return;
+    // Baca status speaker terbaru melalui ref karena listener Firebase hidup lebih lama dari render.
     // Bunyi pendek bawaan selalu diputar agar order tetap terdengar, termasuk bila audio kustom senyap/gagal.
     playDefaultBeep();
     if (customAudioData && audioRef.current) {
@@ -677,12 +681,13 @@ export default function OrderPage() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <button onClick={() => { playDefaultBeep(); showToast("Tes suara notifikasi"); }} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Tes suara notifikasi" aria-label="Tes suara notifikasi">
+            <button onClick={() => { soundEnabledRef.current = true; setSoundEnabled(true); playDefaultBeep(); showToast("Suara notifikasi aktif — tes berbunyi"); }} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Aktifkan dan tes suara notifikasi" aria-label="Aktifkan dan tes suara notifikasi">
               <Play size={16} />
             </button>
             <button
               onClick={() => {
                 const nextEnabled = !soundEnabled;
+                soundEnabledRef.current = nextEnabled;
                 setSoundEnabled(nextEnabled);
                 if (nextEnabled) playDefaultBeep();
                 showToast(nextEnabled ? "Suara aktif (tes notifikasi)" : "Suara dinonaktifkan");
