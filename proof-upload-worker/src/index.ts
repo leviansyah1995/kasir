@@ -46,6 +46,16 @@ function repoDetails(env: Env) {
   return { owner, name, branch: env.GITHUB_PROOF_BRANCH || "main" };
 }
 
+function isAllowedNotificationMp3(value: string) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const isAllowedHost = ["rawcdn.githack.com", "raw.githack.com", "gistcdn.githack.com", "cdn.jsdelivr.net"].includes(host);
+    const isJsDelivrGhAsset = host !== "cdn.jsdelivr.net" || parsed.pathname.startsWith("/gh/");
+    return parsed.protocol === "https:" && isAllowedHost && isJsDelivrGhAsset && parsed.pathname.toLowerCase().endsWith(".mp3");
+  } catch { return false; }
+}
+
 async function privateRepoCheck(owner: string, name: string, env: Env): Promise<boolean> {
   const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
     headers: { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "user-agent": "POS-private-proof-proxy" },
@@ -71,6 +81,24 @@ export default {
     if (!idToken) return json({ error: "Login diperlukan." }, 401, origin, env.ALLOWED_ORIGIN);
     const firebaseUser = await firebaseUserForToken(idToken, env);
     if (!firebaseUser) return json({ error: "Sesi Firebase tidak valid. Silakan login ulang." }, 401, origin, env.ALLOWED_ORIGIN);
+
+    // Proxy MP3 publik GitHack server-side supaya Web Audio dapat mendekode MP3 tanpa bergantung pada CORS CDN.
+    if (request.method === "GET") {
+      const requestedAudioUrl = new URL(request.url).searchParams.get("audioUrl");
+      if (requestedAudioUrl) {
+        if (firebaseUser.email?.toLowerCase() !== ADMIN_EMAIL || firebaseUser.emailVerified !== true) return json({ error: "Hanya admin terverifikasi yang boleh mengambil MP3 notifikasi." }, 403, origin, env.ALLOWED_ORIGIN);
+        if (!isAllowedNotificationMp3(requestedAudioUrl)) return json({ error: "URL harus HTTPS langsung ke file .mp3 pada GitHack atau jalur /gh/ di jsDelivr." }, 400, origin, env.ALLOWED_ORIGIN);
+        const upstream = await fetch(requestedAudioUrl, { headers: { "accept": "audio/mpeg, application/octet-stream;q=0.9, */*;q=0.8" } });
+        if (!upstream.ok) return json({ error: `CDN MP3 mengembalikan status ${upstream.status}.` }, 502, origin, env.ALLOWED_ORIGIN);
+        const upstreamType = (upstream.headers.get("content-type") || "").toLowerCase();
+        if (upstreamType.includes("text/html")) return json({ error: "Link tersebut membuka halaman HTML, bukan file MP3 langsung." }, 415, origin, env.ALLOWED_ORIGIN);
+        const declaredLength = Number(upstream.headers.get("content-length") || 0);
+        if (declaredLength > 12 * 1024 * 1024) return json({ error: "MP3 terlalu besar (maksimal 12 MB)." }, 413, origin, env.ALLOWED_ORIGIN);
+        const audioBytes = await upstream.arrayBuffer();
+        if (audioBytes.byteLength < 100 || audioBytes.byteLength > 12 * 1024 * 1024) return json({ error: "MP3 kosong atau terlalu besar (maksimal 12 MB)." }, 413, origin, env.ALLOWED_ORIGIN);
+        return new Response(audioBytes, { status: 200, headers: { "content-type": "audio/mpeg", "cache-control": "private, max-age=300", ...cors(origin, env.ALLOWED_ORIGIN) } });
+      }
+    }
 
     const repo = repoDetails(env);
     if (!repo) return json({ error: "Nama repo GitHub tidak valid." }, 500, origin, env.ALLOWED_ORIGIN);

@@ -10,10 +10,11 @@ import {
 } from "lucide-react";
 import { auth, db } from "../../lib/firebase";
 import * as XLSX from "xlsx";
-import { ref, onValue, remove, update } from "firebase/database";
+import { ref, onValue, remove, set, update } from "firebase/database";
 import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 
 const ALLOWED_ADMIN_EMAIL = "dianarifin.shopeedriver@gmail.com";
+const DEFAULT_ORDER_AUDIO_URL = "https://cdn.jsdelivr.net/gh/leviansyah1995/asset@main/orderan.mp3";
 
 interface CartItem {
   id: string;
@@ -90,13 +91,27 @@ const statusMessageText = (status: string) => ({
 }[statusKind(status)] || "ada pembaruan untuk pesanan Anda");
 
 let orderAudioContext: AudioContext | null = null;
+let orderAudioKeepAlive: OscillatorNode | null = null;
+const getOrderAudioContext = () => {
+  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioContextClass) throw new Error("Browser tidak mendukung Web Audio.");
+  // Context dibuat sekali, lalu dipakai untuk decoding MP3 dan semua alert di perangkat ini.
+  if (!orderAudioContext || orderAudioContext.state === "closed") {
+    orderAudioContext = new AudioContextClass();
+    const silentGain = orderAudioContext.createGain();
+    silentGain.gain.value = 0;
+    orderAudioKeepAlive = orderAudioContext.createOscillator();
+    orderAudioKeepAlive.frequency.value = 24;
+    orderAudioKeepAlive.connect(silentGain);
+    silentGain.connect(orderAudioContext.destination);
+    orderAudioKeepAlive.start();
+  }
+  return orderAudioContext;
+};
 const playDefaultBeep = () => {
   try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return;
-    // Pakai satu context yang dibuka lewat klik admin (tes suara), jangan tutup setelah beep pertama.
-    orderAudioContext ||= new AudioContextClass();
-    const ctx = orderAudioContext;
+    // Oscillator senyap menjaga context tetap aktif sesudah izin audio diberikan.
+    const ctx = getOrderAudioContext();
     const play = () => {
       if (ctx.state !== "running") return;
       const now = ctx.currentTime;
@@ -151,12 +166,31 @@ export default function OrderPage() {
   // Users State (Firebase)
   const [shopUsers, setShopUsers] = useState<ShopUser[]>([]);
 
-  // Sound Notification
+  // Sound notification: URL MP3 shared through Firebase, one serial queue per admin device.
   const [soundEnabled, setSoundEnabled] = useState(true);
   const soundEnabledRef = useRef(true);
   const [customAudioData, setCustomAudioData] = useState<string | null>(null);
+  const customAudioDataRef = useRef<string | null>(null);
   const [customAudioName, setCustomAudioName] = useState<string>("");
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [sharedAudioUrl, setSharedAudioUrl] = useState(DEFAULT_ORDER_AUDIO_URL);
+  const sharedAudioUrlRef = useRef(DEFAULT_ORDER_AUDIO_URL);
+  const [audioUrlDraft, setAudioUrlDraft] = useState(DEFAULT_ORDER_AUDIO_URL);
+  const [audioUrlSaving, setAudioUrlSaving] = useState(false);
+  const [audioUrlError, setAudioUrlError] = useState("");
+  const [audioUrlLoaded, setAudioUrlLoaded] = useState(false);
+  const [audioBufferLoading, setAudioBufferLoading] = useState(false);
+  const audioBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+  const audioBufferPromisesRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
+  const audioBufferLoadingRef = useRef<Set<string>>(new Set());
+  const audioUnlockedRef = useRef(false);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [audioNeedsGesture, setAudioNeedsGesture] = useState(false);
+  const audioNeedsGestureRef = useRef(false);
+  const [queuedSoundCount, setQueuedSoundCount] = useState(0);
+  const audioQueueRef = useRef<Array<{ id: number; src: string | null; label: string }>>([]);
+  const audioQueueSequenceRef = useRef(0);
+  const activeAudioItemRef = useRef<number | null>(null);
+  const audioQueuePlayingRef = useRef(false);
 
   // Toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -172,11 +206,187 @@ export default function OrderPage() {
 
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
+  const syncQueueCount = () => setQueuedSoundCount(audioQueueRef.current.length);
+  const setGestureRequired = (required: boolean) => {
+    audioNeedsGestureRef.current = required;
+    setAudioNeedsGesture(required);
+  };
+  const loadAudioBuffer = (src: string): Promise<AudioBuffer> => {
+    const cached = audioBufferCacheRef.current.get(src);
+    if (cached) return Promise.resolve(cached);
+    const inflight = audioBufferPromisesRef.current.get(src);
+    if (inflight) return inflight;
+    const task = (async () => {
+      audioBufferLoadingRef.current.add(src);
+      setAudioBufferLoading(true);
+      try {
+        let bytes: ArrayBuffer;
+        if (src.startsWith("data:")) {
+          const response = await fetch(src);
+          if (!response.ok) throw new Error("File audio lokal tidak dapat dibaca.");
+          bytes = await response.arrayBuffer();
+        } else {
+          const endpoint = process.env.NEXT_PUBLIC_PROOF_UPLOAD_URL;
+          const currentUser = auth.currentUser;
+          if (!endpoint || !currentUser) throw new Error("Worker audio atau sesi admin belum tersedia.");
+          const token = await currentUser.getIdToken();
+          const proxyUrl = new URL(endpoint);
+          proxyUrl.searchParams.set("audioUrl", src);
+          const response = await fetch(proxyUrl.toString(), { headers: { Authorization: `Bearer ${token}` } });
+          if (!response.ok) throw new Error(await response.text() || "Gagal mengambil MP3 dari CDN.");
+          bytes = await response.arrayBuffer();
+        }
+        if (bytes.byteLength < 100 || bytes.byteLength > 12 * 1024 * 1024) throw new Error("MP3 kosong atau terlalu besar (maksimal 12 MB).");
+        const context = getOrderAudioContext();
+        const decoded = await context.decodeAudioData(bytes.slice(0));
+        audioBufferCacheRef.current.set(src, decoded);
+        if (src === sharedAudioUrlRef.current) setAudioUrlError("");
+        return decoded;
+      } catch (error: any) {
+        if (src === sharedAudioUrlRef.current) setAudioUrlError(error?.message || "MP3 gagal dimuat.");
+        throw error;
+      } finally {
+        audioBufferLoadingRef.current.delete(src);
+        setAudioBufferLoading(audioBufferLoadingRef.current.size > 0);
+        audioBufferPromisesRef.current.delete(src);
+      }
+    })();
+    audioBufferPromisesRef.current.set(src, task);
+    return task;
+  };
+  const finishCurrentAudio = (expectedId = activeAudioItemRef.current) => {
+    if (expectedId === null || audioQueueRef.current[0]?.id !== expectedId) return;
+    audioQueueRef.current.shift();
+    activeAudioItemRef.current = null;
+    audioQueuePlayingRef.current = false;
+    audioSourceRef.current = null;
+    syncQueueCount();
+    setGestureRequired(false);
+    if (audioQueueRef.current.length > 0 && soundEnabledRef.current) {
+      window.setTimeout(() => playNextQueuedAudio(), 100);
+    }
+  };
+  const finishFallbackBeep = (expectedId: number) => {
+    audioQueuePlayingRef.current = true;
+    playDefaultBeep();
+    window.setTimeout(() => finishCurrentAudio(expectedId), 750);
+  };
+  const playNextQueuedAudio = (fromUserGesture = false) => {
+    if (audioQueuePlayingRef.current || audioQueueRef.current.length === 0) return;
+    if (!soundEnabledRef.current && !fromUserGesture) return;
+    const next = audioQueueRef.current[0];
+    activeAudioItemRef.current = next.id;
+    let context: AudioContext;
+    try { context = getOrderAudioContext(); }
+    catch (error) { console.error("Web Audio tidak tersedia:", error); setGestureRequired(true); return; }
+    if (!audioUnlockedRef.current || context.state !== "running") {
+      if (!fromUserGesture) { setGestureRequired(true); return; }
+      void context.resume().then(() => {
+        if (context.state === "running") {
+          audioUnlockedRef.current = true;
+          setGestureRequired(false);
+          playNextQueuedAudio(true);
+        } else setGestureRequired(true);
+      }).catch(() => setGestureRequired(true));
+      return;
+    }
+    if (!next.src) {
+      finishFallbackBeep(next.id);
+      return;
+    }
+    const buffer = audioBufferCacheRef.current.get(next.src);
+    if (!buffer) {
+      void loadAudioBuffer(next.src).then(() => {
+        if (audioQueueRef.current[0]?.id === next.id) playNextQueuedAudio();
+      }).catch(error => {
+        console.error("MP3 order gagal dimuat, memakai beep bawaan:", error);
+        if (audioQueueRef.current[0]?.id === next.id) finishFallbackBeep(next.id);
+      });
+      return;
+    }
+    try {
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      source.onended = () => finishCurrentAudio(next.id);
+      audioSourceRef.current = source;
+      audioQueuePlayingRef.current = true;
+      source.start(0);
+    } catch (error) {
+      console.error("MP3 order gagal dimainkan:", error);
+      finishFallbackBeep(next.id);
+    }
+  };
+  const handleSoundActivationOrTest = () => {
+    soundEnabledRef.current = true;
+    setSoundEnabled(true);
+    setGestureRequired(false);
+    if (audioQueueRef.current.length === 0) {
+      const src = sharedAudioUrlRef.current || customAudioDataRef.current;
+      audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: "Tes suara" });
+      syncQueueCount();
+    }
+    let context: AudioContext;
+    try { context = getOrderAudioContext(); }
+    catch (error: any) { showToast(error?.message || "Browser tidak mendukung audio."); return; }
+    // resume dipanggil langsung dari klik pengguna; setelah context running, buffer MP3
+    // dijalankan satu per satu tanpa perlu klik ulang untuk setiap order.
+    void context.resume().then(() => {
+      if (context.state === "running") {
+        audioUnlockedRef.current = true;
+        setGestureRequired(false);
+        playNextQueuedAudio(true);
+      } else setGestureRequired(true);
+    }).catch(error => {
+      console.warn("Audio perlu aktivasi ulang:", error);
+      setGestureRequired(true);
+    });
+  };
+  const enqueueOrderAudio = (orderNumber: string) => {
+    if (!soundEnabledRef.current) return;
+    const src = sharedAudioUrlRef.current || customAudioDataRef.current;
+    audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: orderNumber });
+    syncQueueCount();
+    if (!audioUnlockedRef.current) setGestureRequired(true);
+    else playNextQueuedAudio();
+  };
+  const validNotificationMp3 = (value: string) => {
+    try {
+      const parsed = new URL(value);
+      const host = parsed.hostname.toLowerCase();
+      const isAllowedHost = ["rawcdn.githack.com", "raw.githack.com", "gistcdn.githack.com", "cdn.jsdelivr.net"].includes(host);
+      const isJsDelivrGhAsset = host !== "cdn.jsdelivr.net" || parsed.pathname.startsWith("/gh/");
+      return parsed.protocol === "https:" && isAllowedHost && isJsDelivrGhAsset && parsed.pathname.toLowerCase().endsWith(".mp3");
+    } catch { return false; }
+  };
+  const saveSharedAudioUrl = async () => {
+    const value = audioUrlDraft.trim();
+    if (value && !validNotificationMp3(value)) {
+      setAudioUrlError("Masukkan URL HTTPS langsung berakhiran .mp3 dari GitHack atau jsDelivr.");
+      return;
+    }
+    setAudioUrlSaving(true);
+    setAudioUrlError("");
+    try {
+      const settingRef = ref(db, "settings/orderNotificationAudioUrl");
+      if (value) await set(settingRef, value); else await remove(settingRef);
+      const appliedValue = value || DEFAULT_ORDER_AUDIO_URL;
+      sharedAudioUrlRef.current = appliedValue;
+      setSharedAudioUrl(appliedValue);
+      setAudioUrlDraft(appliedValue);
+      showToast(value ? "URL MP3 disimpan dan disinkronkan ke semua perangkat admin." : "URL default dipulihkan untuk semua perangkat admin.");
+    } catch (error: any) {
+      console.error("Gagal menyimpan URL suara:", error);
+      setAudioUrlError(error?.message || "Gagal menyimpan. Periksa akses Admin pada Firebase Rules.");
+    } finally { setAudioUrlSaving(false); }
+  };
+
   // 1. Auth Observer (Tanpa Redirect Otomatis ke Shop saat Logout)
   useEffect(() => {
     const savedAudio = localStorage.getItem("order_sound_data");
     const savedAudioName = localStorage.getItem("order_sound_name");
     if (savedAudio) {
+      customAudioDataRef.current = savedAudio;
       setCustomAudioData(savedAudio);
       setCustomAudioName(savedAudioName || "custom-audio.mp3");
     }
@@ -199,6 +409,36 @@ export default function OrderPage() {
 
     return () => unsubAuth();
   }, []);
+
+  // URL notifikasi disimpan di Firebase agar seluruh perangkat admin memakai sumber MP3 yang sama.
+  useEffect(() => {
+    if (!authUser) { setAudioUrlLoaded(false); return; }
+    setAudioUrlLoaded(false);
+    const unsubscribe = onValue(ref(db, "settings/orderNotificationAudioUrl"), snapshot => {
+      const rawValue = snapshot.val();
+      const value = typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : DEFAULT_ORDER_AUDIO_URL;
+      sharedAudioUrlRef.current = value;
+      setSharedAudioUrl(value);
+      setAudioUrlDraft(value);
+      setAudioUrlLoaded(true);
+      setAudioUrlError("");
+    }, error => {
+      console.error("Gagal membaca URL MP3 bersama:", error);
+      setAudioUrlError("Tidak dapat membaca pengaturan bersama. Pastikan Firebase Rules memberi akses Admin ke settings.");
+      setAudioUrlLoaded(true);
+    });
+    return () => unsubscribe();
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser || !sharedAudioUrl) return;
+    void loadAudioBuffer(sharedAudioUrl).catch(error => console.error("Shared MP3 preloading failed:", error));
+  }, [authUser, sharedAudioUrl]);
+
+  useEffect(() => {
+    if (!customAudioData) return;
+    void loadAudioBuffer(customAudioData).catch(error => console.warn("Local fallback MP3 failed to load:", error));
+  }, [customAudioData]);
 
   // 2. Realtime Firebase Orders & Users
   useEffect(() => {
@@ -237,7 +477,7 @@ export default function OrderPage() {
         const newProcessing = initialLoaded ? loaded.filter(o => statusKind(o.status) === "processing" && !previous.has(o.id) && !notifiedOrderIds.current.has(o.id)) : [];
         const newlyArrived = [...pendingUnheard, ...newProcessing];
         if (newlyArrived.length > 0) {
-          triggerNotificationSound();
+          newlyArrived.forEach(order => enqueueOrderAudio(order.orderNumber));
           showToast(pendingUnheard.length > 0 ? `Ada ${pendingUnheard.length} order menunggu verifikasi pembayaran!` : "Pesanan baru masuk!");
           newlyArrived.forEach(o => notifiedOrderIds.current.add(o.id));
           try { sessionStorage.setItem("order_notified_ids", JSON.stringify([...notifiedOrderIds.current])); } catch {}
@@ -311,17 +551,6 @@ export default function OrderPage() {
     proofObjectUrls.current.clear();
   }, []);
 
-  const triggerNotificationSound = () => {
-    if (!soundEnabledRef.current) return;
-    // Baca status speaker terbaru melalui ref karena listener Firebase hidup lebih lama dari render.
-    // Bunyi pendek bawaan selalu diputar agar order tetap terdengar, termasuk bila audio kustom senyap/gagal.
-    playDefaultBeep();
-    if (customAudioData && audioRef.current) {
-      audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(error => console.warn("Audio kustom gagal diputar:", error));
-    }
-  };
-
   const handleLoginGoogle = async () => {
     setLoginError(null);
     try {
@@ -393,6 +622,7 @@ export default function OrderPage() {
     const reader = new FileReader();
     reader.onload = (event) => {
       const base64 = event.target?.result as string;
+      customAudioDataRef.current = base64;
       setCustomAudioData(base64);
       setCustomAudioName(file.name);
       localStorage.setItem("order_sound_data", base64);
@@ -403,6 +633,7 @@ export default function OrderPage() {
   };
 
   const handleResetSound = () => {
+    customAudioDataRef.current = null;
     setCustomAudioData(null);
     setCustomAudioName("");
     localStorage.removeItem("order_sound_data");
@@ -658,8 +889,6 @@ export default function OrderPage() {
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between font-sans antialiased text-slate-800">
       
-      {/* Hidden Audio */}
-      {customAudioData && <audio ref={audioRef} src={customAudioData} preload="auto" />}
       {proofPreviewUrl && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4" onClick={() => setProofPreviewUrl(null)}><button aria-label="Tutup foto" className="absolute right-4 top-4 rounded-full bg-white/90 px-4 py-2 text-sm font-bold text-slate-900">Tutup</button><img src={proofPreviewUrl} alt="Bukti pembayaran ukuran besar" onClick={e => e.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-xl bg-white object-contain shadow-2xl" /></div>}
 
       {/* Floating Toast Notification */}
@@ -667,6 +896,13 @@ export default function OrderPage() {
         <div className="fixed top-4 inset-x-4 max-w-sm mx-auto z-50 bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-semibold animate-in fade-in slide-in-from-top-2">
           <Bell size={16} className="text-orange-400 shrink-0" />
           <span className="flex-1">{toastMessage}</span>
+        </div>
+      )}
+      {audioNeedsGesture && queuedSoundCount > 0 && (
+        <div role="alert" className="fixed bottom-24 inset-x-3 z-[70] mx-auto max-w-md rounded-2xl border border-amber-300 bg-amber-50 p-3 shadow-2xl">
+          <p className="text-xs font-black text-amber-950">{queuedSoundCount} bunyi order menunggu diputar</p>
+          <p className="mt-0.5 text-[10px] text-amber-800">Chrome meminta klik pengguna sebelum audio dimulai.</p>
+          <button onClick={handleSoundActivationOrTest} className="mt-2 w-full rounded-xl bg-orange-600 px-3 py-2.5 text-xs font-black text-white">Aktifkan suara dan putar antrean</button>
         </div>
       )}
 
@@ -681,16 +917,24 @@ export default function OrderPage() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <button onClick={() => { soundEnabledRef.current = true; setSoundEnabled(true); playDefaultBeep(); showToast("Suara notifikasi aktif — tes berbunyi"); }} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Aktifkan dan tes suara notifikasi" aria-label="Aktifkan dan tes suara notifikasi">
+            <button onClick={handleSoundActivationOrTest} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Aktifkan dan tes suara notifikasi" aria-label="Aktifkan dan tes suara notifikasi">
               <Play size={16} />
             </button>
             <button
               onClick={() => {
-                const nextEnabled = !soundEnabled;
-                soundEnabledRef.current = nextEnabled;
-                setSoundEnabled(nextEnabled);
-                if (nextEnabled) playDefaultBeep();
-                showToast(nextEnabled ? "Suara aktif (tes notifikasi)" : "Suara dinonaktifkan");
+                if (!soundEnabledRef.current) {
+                  handleSoundActivationOrTest();
+                } else {
+                  soundEnabledRef.current = false;
+                  setSoundEnabled(false);
+                  if (audioSourceRef.current) {
+                    audioSourceRef.current.onended = null;
+                    try { audioSourceRef.current.stop(); } catch {}
+                    audioSourceRef.current = null;
+                  }
+                  audioQueuePlayingRef.current = false;
+                  showToast("Suara dinonaktifkan");
+                }
               }}
               className={`p-2 rounded-xl border text-xs ${
                 soundEnabled 
@@ -1029,51 +1273,37 @@ export default function OrderPage() {
           {activeTab === "pengaturan" && (
             <div className="space-y-4">
               
-              {/* 1. UBAH NOTIFIKASI SUARA (UNGGAH MP3 LEWAT HP/PC) */}
+              {/* 1. LINK MP3 BERSAMA UNTUK SEMUA PERANGKAT ADMIN */}
               <div className="bg-white rounded-2xl p-4 border border-slate-200 space-y-3 shadow-xs">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Suara Notifikasi Pesanan</h3>
-                  <p className="text-[11px] text-slate-400 mt-0.5">Unggah MP3 dari HP untuk nada order masuk.</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">MP3 bawaan sudah terpasang. Anda dapat menggantinya dengan URL langsung dari GitHack atau jsDelivr; perubahan disinkronkan ke semua perangkat admin.</p>
                 </div>
 
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-500">Nada Saat Ini:</span>
-                    <span className="font-semibold text-slate-800 truncate max-w-[160px]">
-                      {customAudioName || "Nada Bawaan"}
-                    </span>
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <label htmlFor="shared-order-audio-url" className="text-[11px] font-bold text-slate-700">URL MP3 bersama</label>
+                  <input id="shared-order-audio-url" type="url" value={audioUrlDraft} onChange={e => setAudioUrlDraft(e.target.value)} placeholder={DEFAULT_ORDER_AUDIO_URL} disabled={!audioUrlLoaded} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:border-orange-400 disabled:opacity-60" />
+                  <div className="flex gap-2">
+                    <button onClick={saveSharedAudioUrl} disabled={audioUrlSaving || !audioUrlLoaded} className="flex-1 rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">{audioUrlSaving ? "Menyimpan…" : "Simpan untuk semua admin"}</button>
+                    <button onClick={handleSoundActivationOrTest} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white"><Play size={13} className="inline mr-1"/>Tes / Aktifkan</button>
                   </div>
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      onClick={triggerNotificationSound}
-                      className="flex-1 bg-slate-900 text-white text-xs font-semibold py-2 rounded-xl flex items-center justify-center gap-1 active:scale-95"
-                    >
-                      <Play size={12} />
-                      <span>Tes Suara</span>
-                    </button>
-                    {customAudioData && (
-                      <button
-                        onClick={handleResetSound}
-                        className="px-3 bg-white border border-slate-200 text-slate-600 text-xs font-semibold py-2 rounded-xl"
-                      >
-                        Reset
-                      </button>
-                    )}
-                  </div>
+                  <p className="text-[10px] leading-relaxed text-slate-500">URL harus HTTPS langsung ke file .mp3, bukan halaman GitHub. Mengosongkan lalu menyimpan akan memulihkan URL default.</p>
+                  <p className="text-[10px] text-slate-600">Status: {!audioUrlLoaded ? "Memuat pengaturan…" : sharedAudioUrl === DEFAULT_ORDER_AUDIO_URL ? "MP3 default aktif" : "MP3 kustom bersama aktif"}{audioBufferLoading ? " • Memuat MP3…" : ""}</p>
+                  {audioUrlError && <p role="alert" className="text-[10px] font-semibold text-red-600">{audioUrlError}</p>}
                 </div>
 
-                <label className="border border-dashed border-slate-300 hover:border-orange-400 rounded-xl p-3 flex flex-col items-center justify-center text-center cursor-pointer bg-slate-50/50">
-                  <input
-                    type="file"
-                    accept="audio/mp3,audio/*"
-                    onChange={handleUploadSound}
-                    className="hidden"
-                  />
-                  <Upload size={18} className="text-orange-500 mb-1" />
-                  <span className="text-xs font-semibold text-slate-700">Pilih File MP3 dari HP/PC</span>
-                  <span className="text-[10px] text-slate-400 mt-0.5">Format .mp3 (Maks. 5 MB)</span>
-                </label>
+                <details className="rounded-xl border border-slate-200 p-3">
+                  <summary className="cursor-pointer text-[11px] font-bold text-slate-700">Cadangan lokal perangkat ini</summary>
+                  <p className="mb-2 mt-2 text-[10px] text-slate-500">Dipakai hanya jika URL bersama belum diisi; tidak tersinkron ke perangkat lain.</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-[10px] text-slate-600">{customAudioName || "Tidak ada MP3 lokal"}</span>
+                    {customAudioData && <button onClick={handleResetSound} className="rounded border border-slate-200 px-2 py-1 text-[10px] font-semibold">Hapus</button>}
+                  </div>
+                  <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 p-2 text-[10px] font-semibold text-slate-700">
+                    <input type="file" accept="audio/mp3,audio/*" onChange={handleUploadSound} className="hidden" />
+                    <Upload size={14} className="text-orange-500"/>Pilih MP3 lokal (maks. 5 MB)
+                  </label>
+                </details>
               </div>
 
               {/* 2. DELETE RIWAYAT PESANAN */}
