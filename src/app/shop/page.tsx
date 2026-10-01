@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { 
   Search, Plus, Minus, ShoppingBasket, User, 
   ChevronRight, Home, Clock, ClipboardList, Settings, MapPin, CheckCircle,
-  Heart, Share2, X, ArrowLeft, LogOut, QrCode
+  Heart, Share2, X, ArrowLeft, LogOut, QrCode, WifiOff, RefreshCw, Send, Copy, Sparkles, MessageCircle
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, set, push, update, remove, runTransaction, query, orderByChild, equalTo } from "firebase/database";
@@ -92,6 +92,8 @@ const getStatusText = (status: string) => {
 // ==============================================
 export default function ShopPage() {
   const [isClient, setIsClient] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [isCheckingNetwork, setIsCheckingNetwork] = useState(false);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [activeTab, setActiveTab] = useState<"home"|"active"|"history"|"settings"|"cart"|"wishlist">("home");
 
@@ -101,6 +103,8 @@ export default function ShopPage() {
   const [favorites, setFavorites] = useState<string[]>([]);
   
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [shareSheetOpen, setShareSheetOpen] = useState(false);
+  const [sharedProductHandled, setSharedProductHandled] = useState(false);
   const [customizingProduct, setCustomizingProduct] = useState<Product | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -117,6 +121,34 @@ export default function ShopPage() {
   const [paymentProofPreview, setPaymentProofPreview] = useState("");
   const [isQrisOpen, setIsQrisOpen] = useState(false);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+
+  const checkInternetConnection = async () => {
+    if (typeof navigator === "undefined") return;
+    if (!navigator.onLine) { setIsOnline(false); return; }
+    setIsCheckingNetwork(true);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`/connection-check.txt?__connectivity_check=${Date.now()}`, { cache: "no-store", signal: controller.signal });
+      setIsOnline(response.ok);
+      void response.body?.cancel();
+    } catch { setIsOnline(false); }
+    finally { window.clearTimeout(timeout); setIsCheckingNetwork(false); }
+  };
+
+  useEffect(() => {
+    const onOffline = () => setIsOnline(false);
+    const onOnline = () => { void checkInternetConnection(); };
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
+    void checkInternetConnection();
+    const retry = window.setInterval(() => { void checkInternetConnection(); }, 20000);
+    return () => {
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
+      window.clearInterval(retry);
+    };
+  }, []);
 
   useEffect(() => {
     setIsClient(true);
@@ -208,6 +240,16 @@ export default function ShopPage() {
     if (user) set(ref(db, `users/${user.uid}/favorites`), favorites);
   }, [favorites]);
 
+  useEffect(() => {
+    if (!isClient || sharedProductHandled || products.length === 0) return;
+    const productId = new URLSearchParams(window.location.search).get("product");
+    if (productId) {
+      const product = products.find(item => item.id === productId);
+      if (product) setSelectedProduct(product);
+    }
+    setSharedProductHandled(true);
+  }, [isClient, sharedProductHandled, products]);
+
   const handleLogin = async () => {
     if (user) return setActiveTab("settings");
     try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch (e) { console.error(e); }
@@ -217,6 +259,32 @@ export default function ShopPage() {
     if (confirm("Yakin ingin keluar dari akun?")) {
       await signOut(auth);
       setActiveTab("home");
+    }
+  };
+
+  const handleShareProduct = async (platform: "whatsapp" | "facebook" | "telegram" | "x" | "native" | "copy", product: Product) => {
+    const url = `${window.location.origin}/shop?product=${encodeURIComponent(product.id)}`;
+    const message = `Yuk coba ${product.name} (${formatRp(product.price)}) di Toko Manis! ${url}`;
+    const encodedUrl = encodeURIComponent(url);
+    const encodedText = encodeURIComponent(`Yuk coba ${product.name} (${formatRp(product.price)}) di Toko Manis!`);
+    setShareSheetOpen(false);
+    if (platform === "whatsapp") {
+      // Click-to-chat: membuka draft WhatsApp saja, tidak mengirim otomatis.
+      window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
+    } else if (platform === "facebook") {
+      window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`, "_blank", "noopener,noreferrer,width=640,height=600");
+    } else if (platform === "telegram") {
+      window.open(`https://t.me/share/url?url=${encodedUrl}&text=${encodedText}`, "_blank", "noopener,noreferrer");
+    } else if (platform === "x") {
+      window.open(`https://twitter.com/intent/tweet?text=${encodedText}&url=${encodedUrl}`, "_blank", "noopener,noreferrer,width=640,height=500");
+    } else if (platform === "native" && navigator.share) {
+      try { await navigator.share({ title: product.name, text: `Yuk coba ${product.name} di Toko Manis!`, url }); }
+      catch (error: any) { if (error?.name !== "AbortError") console.warn("Bagikan gagal:", error); }
+    } else {
+      try {
+        await navigator.clipboard.writeText(url);
+        alert("Link produk berhasil disalin.");
+      } catch { alert(`Salin link ini: ${url}`); }
     }
   };
 
@@ -378,58 +446,74 @@ export default function ShopPage() {
   const historyOrders = myOrders.filter(o => ["completed", "canceled"].includes(orderStatusKind(o.status)));
 
   if (!isClient) return null;
+  if (!isOnline) return (
+    <main className="fixed inset-0 z-[200] flex items-center justify-center overflow-hidden bg-gradient-to-br from-orange-50 via-rose-50 to-sky-50 px-6 text-center">
+      <div className="pointer-events-none absolute -left-16 top-16 h-48 w-48 rounded-full bg-orange-200/40 blur-3xl animate-pulse" />
+      <div className="pointer-events-none absolute -right-12 bottom-10 h-56 w-56 rounded-full bg-sky-200/50 blur-3xl animate-pulse" />
+      <section className="relative z-10 mx-auto w-full max-w-sm rounded-[32px] border border-white/80 bg-white/80 p-7 shadow-xl backdrop-blur-md">
+        <div className="relative mx-auto mb-5 flex h-28 w-28 items-center justify-center rounded-full bg-orange-100 text-orange-500 shadow-inner">
+          <div className="absolute inset-0 rounded-full border-2 border-orange-200 animate-ping opacity-40" />
+          <WifiOff size={48} strokeWidth={1.8} className="animate-bounce" />
+          <Sparkles size={19} className="absolute -right-1 top-1 text-amber-500 animate-pulse" />
+        </div>
+        <p className="mb-2 text-[10px] font-black uppercase tracking-[0.22em] text-orange-500">Sinyal sedang petak umpet</p>
+        <h1 className="text-2xl font-black leading-tight text-slate-900">Yah, internetnya kabur! 😵‍💫</h1>
+        <p className="mt-3 text-sm leading-relaxed text-slate-600">Kuota atau sinyalnya mungkin sedang istirahat. Tenang, selama halaman ini tetap terbuka, isi keranjangmu masih menunggu di sini.</p>
+        <div className="mt-5 rounded-2xl bg-orange-50 px-4 py-3 text-xs font-semibold text-orange-800">Kami cek koneksi lagi otomatis sebentar lagi. Coba dekati Wi-Fi atau bangunkan kuotanya dulu, ya.</div>
+        <button onClick={() => { void checkInternetConnection(); }} disabled={isCheckingNetwork} className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-orange-500 px-4 py-3.5 text-sm font-black text-white shadow-lg shadow-orange-500/25 transition active:scale-[0.98] disabled:opacity-70">
+          <RefreshCw size={16} className={isCheckingNetwork ? "animate-spin" : ""} />
+          {isCheckingNetwork ? "Mencari sinyal…" : "Coba sambungkan lagi"}
+        </button>
+        <p className="mt-4 text-[10px] text-slate-400">Janji, rotinya tidak ikut offline 🍞</p>
+      </section>
+    </main>
+  );
 
   // ---- Product Card ----
   const ProductCardGrid = ({ product }: { product: Product }) => {
     const qty = getTotalProductQty(product.id);
     return (
-      <div
-        className="relative bg-[#Fdf4e3] rounded-[24px] p-3 pt-14 flex flex-col border border-orange-200/50 shadow-sm cursor-pointer hover:bg-orange-100 transition-colors"
+      <article
+        className="group flex h-full min-w-0 cursor-pointer flex-col overflow-hidden rounded-[22px] border border-orange-100 bg-white shadow-[0_5px_18px_rgba(124,45,18,0.08)] transition duration-200 hover:-translate-y-0.5 hover:shadow-md"
         onClick={() => setSelectedProduct(product)}
       >
-        <div className="absolute -top-12 left-1/2 -translate-x-1/2 w-[100px] h-[100px] rounded-full border-[4px] border-[#fbfbfb] shadow-md overflow-hidden bg-white shrink-0">
-          <img src={product.imageUrl || FALLBACK_PRODUCT_IMAGE} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PRODUCT_IMAGE; }} alt={product.name} className="w-full h-full object-cover" />
+        <div className="relative aspect-[1.12/1] w-full overflow-hidden bg-orange-50">
+          <img src={product.imageUrl || FALLBACK_PRODUCT_IMAGE} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PRODUCT_IMAGE; }} alt={product.name} className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
+          {product.stock === 0 && <span className="absolute left-2 top-2 rounded-full bg-slate-900/80 px-2 py-1 text-[9px] font-bold text-white">Stok habis</span>}
         </div>
-        <h3 className="font-black text-slate-800 text-[14px] leading-tight mt-1 line-clamp-2 text-left min-h-[36px]">{product.name}</h3>
-        
-        <div className="mt-auto pt-2 w-full flex items-center justify-between gap-1">
-          <span className="font-black text-slate-900 text-[13px] whitespace-nowrap">{formatRp(product.price)}</span>
-          <div onClick={(e) => e.stopPropagation()}>
-            {qty > 0 ? (
-              <button onClick={() => setCustomizingProduct(product)} className="flex items-center justify-center bg-orange-500 text-white rounded-full px-2 py-1 text-[10px] font-bold shadow-sm whitespace-nowrap">
-                {qty} (Ubah)
-              </button>
-            ) : (
-              <button onClick={() => setCustomizingProduct(product)} disabled={product.stock === 0} className="p-1.5 bg-white hover:bg-orange-50 text-slate-800 rounded-full transition-all disabled:opacity-40 border border-orange-200 shadow-sm">
-                <Plus size={14} strokeWidth={3} />
-              </button>
-            )}
+        <div className="flex min-h-[100px] flex-1 flex-col p-2.5 sm:p-3">
+          <h3 className="line-clamp-2 min-h-[34px] text-[12px] font-extrabold leading-snug text-slate-800 sm:text-sm">{product.name}</h3>
+          <p className="mt-1 line-clamp-1 text-[9px] text-slate-400 sm:text-[10px]">{product.description || `Pilihan favorit ${product.category.toLowerCase()}`}</p>
+          <div className="mt-auto flex items-center justify-between gap-1 pt-2">
+            <span className="min-w-0 truncate text-[11px] font-black text-slate-900 sm:text-[13px]">{formatRp(product.price)}</span>
+            <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+              {qty > 0 ? (
+                <button onClick={() => setCustomizingProduct(product)} className="rounded-full bg-orange-500 px-2 py-1.5 text-[9px] font-bold text-white shadow-sm sm:text-[10px]">{qty} · Ubah</button>
+              ) : (
+                <button onClick={() => setCustomizingProduct(product)} disabled={product.stock === 0} aria-label={`Tambah ${product.name}`} className="rounded-full border border-orange-200 bg-orange-50 p-1.5 text-orange-700 transition hover:bg-orange-100 disabled:opacity-40"><Plus size={14} strokeWidth={3} /></button>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      </article>
     );
   };
 
-  const ProductCardList = ({ product }: { product: Product }) => {
-    return (
-      <div 
-        onClick={() => setSelectedProduct(product)}
-        className="relative ml-8 bg-[#Fdf4e3] rounded-[24px] p-4 pl-[76px] min-h-[110px] flex flex-col justify-center border border-orange-200/50 shadow-sm cursor-pointer hover:bg-orange-100 transition-colors mb-8"
-      >
-        <button onClick={(e) => { e.stopPropagation(); toggleFavorite(product.id); }} className="absolute top-3 right-3 z-10 p-1.5 rounded-full bg-white/50 hover:bg-white transition-colors">
-          <Heart size={16} fill="#f97316" color="#f97316" />
-        </button>
-        <div className="absolute -left-8 top-1/2 -translate-y-1/2 w-[96px] h-[96px] rounded-full border-[4px] border-[#fbfbfb] shadow-md overflow-hidden bg-white shrink-0">
-          <img src={product.imageUrl || FALLBACK_PRODUCT_IMAGE} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PRODUCT_IMAGE; }} alt={product.name} className="w-full h-full object-cover" />
-        </div>
-        <div className="pr-6">
-          <h3 className="font-black text-slate-800 text-[15px] leading-tight line-clamp-1 mb-1">{product.name}</h3>
-          <p className="text-slate-500 text-[10px] line-clamp-2 leading-relaxed mb-2">{product.description || `Nikmati kelezatan ${product.name.toLowerCase()} pilihan.`}</p>
-          <p className="font-black text-slate-900 text-[13px]">{formatRp(product.price)}</p>
-        </div>
+  const ProductCardList = ({ product }: { product: Product }) => (
+    <article onClick={() => setSelectedProduct(product)} className="relative flex cursor-pointer items-center gap-3 rounded-2xl border border-orange-100 bg-white p-3 shadow-sm transition hover:shadow-md">
+      <div className="h-[76px] w-[76px] shrink-0 overflow-hidden rounded-2xl bg-orange-50">
+        <img src={product.imageUrl || FALLBACK_PRODUCT_IMAGE} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PRODUCT_IMAGE; }} alt={product.name} className="h-full w-full object-cover" />
       </div>
-    );
-  };
+      <div className="min-w-0 flex-1 pr-8">
+        <h3 className="line-clamp-1 text-sm font-black text-slate-800">{product.name}</h3>
+        <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{product.description || `Nikmati kelezatan ${product.name.toLowerCase()} pilihan.`}</p>
+        <p className="mt-2 text-xs font-black text-slate-900">{formatRp(product.price)}</p>
+      </div>
+      <button onClick={(e) => { e.stopPropagation(); toggleFavorite(product.id); }} aria-label="Hapus dari wishlist" className="absolute right-2 top-2 z-10 rounded-full bg-orange-50 p-2 text-orange-500 hover:bg-orange-100">
+        <Heart size={16} fill="#f97316" />
+      </button>
+    </article>
+  );
 
   // ==============================================
   // CUSTOM PURCHASE MODAL
@@ -542,7 +626,7 @@ export default function ShopPage() {
       <div className="w-full h-full sm:max-w-[410px] sm:h-[860px] sm:max-h-full sm:rounded-[40px] sm:border-[8px] sm:border-slate-800 bg-[#fbfbfb] shadow-2xl flex overflow-hidden relative">
         
         {/* SIDEBAR KIRI */}
-        <aside className="w-[72px] bg-white border-r border-slate-100 flex flex-col items-center py-7 rounded-r-[28px] shadow-[4px_0_24px_rgba(0,0,0,0.04)] z-20 shrink-0">
+        <aside className="w-[60px] bg-white border-r border-slate-100 flex flex-col items-center py-5 rounded-r-[24px] shadow-[4px_0_24px_rgba(0,0,0,0.04)] z-20 shrink-0">
           <button onClick={handleLogin} className="w-11 h-11 rounded-full bg-slate-100 border-2 border-orange-200 overflow-hidden flex items-center justify-center mb-6 shadow-sm">
             {user ? <img src={user.photoURL || FALLBACK_PROFILE_IMAGE} alt="Foto profil Google" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PROFILE_IMAGE; }} className="w-full h-full object-cover" /> : <User className="text-slate-400" size={20} />}
           </button>
@@ -556,23 +640,22 @@ export default function ShopPage() {
             <button onClick={() => setActiveTab("history")} className={`p-2.5 rounded-2xl transition-all ${activeTab==="history" ? "bg-orange-100 text-orange-600 shadow-sm" : "text-slate-400 hover:text-orange-500"}`}><ClipboardList size={22}/></button>
             <button onClick={() => setActiveTab("settings")} className={`p-2.5 rounded-2xl transition-all ${activeTab==="settings" ? "bg-orange-100 text-orange-600 shadow-sm" : "text-slate-400 hover:text-orange-500"}`}><Settings size={22}/></button>
             
-            {/* LOGOUT BUTTON */}
-            {user && (
-              <button onClick={handleLogout} className="mt-auto p-2.5 rounded-2xl transition-all text-red-400 hover:text-red-500 hover:bg-red-50" title="Keluar">
-                <LogOut size={22} />
-              </button>
-            )}
+            {/* WISHLIST occupies the former sidebar logout slot. */}
+            <button onClick={() => setActiveTab("wishlist")} title="Wishlist" aria-label="Wishlist" className={`relative mt-auto p-2.5 rounded-2xl transition-all ${activeTab === "wishlist" ? "bg-orange-100 text-orange-600" : "text-slate-400 hover:text-orange-500 hover:bg-orange-50"}`}>
+              <Heart size={22} fill={favorites.length > 0 ? "#f97316" : "none"} />
+              {favorites.length > 0 && <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-white bg-red-500 text-[8px] font-bold text-white">{favorites.length}</span>}
+            </button>
           </nav>
           
-          <button onClick={() => setActiveTab("cart")} aria-label={cartCount > 0 ? "Pesan Sekarang" : "Keranjang"} className={`relative mt-4 flex flex-col items-center gap-1 rounded-2xl px-1.5 py-2 transition-all shadow-md ${activeTab==="cart" ? "bg-orange-500 text-white" : "bg-orange-100 text-orange-600"}`}>
+          <button onClick={() => setActiveTab("cart")} aria-label={cartCount > 0 ? "Pesan Sekarang" : "Keranjang"} className={`relative mt-4 flex w-full flex-col items-center gap-1 rounded-2xl px-0.5 py-2 transition-all shadow-md ${activeTab==="cart" ? "bg-orange-500 text-white" : "bg-orange-100 text-orange-600"}`}>
             <ShoppingBasket size={22} />
-            <span className="w-[60px] text-center text-[8px] font-black leading-tight">{cartCount > 0 ? "Pesan Sekarang" : "Keranjang"}</span>
+            <span className="w-[56px] text-center text-[8px] font-black leading-tight">{cartCount > 0 ? "Pesan Sekarang" : "Keranjang"}</span>
             {cartCount > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white">{cartCount}</span>}
           </button>
         </aside>
 
         {/* KONTEN UTAMA */}
-        <main className="flex-1 overflow-y-auto pb-10 relative min-w-0 scroll-smooth bg-[#fbfbfb]">
+        <main className="flex-1 overflow-y-auto pb-24 relative min-w-0 scroll-smooth bg-[#fbfbfb]">
           
           {/* TAB: BERANDA */}
           {activeTab === "home" && (
@@ -582,10 +665,9 @@ export default function ShopPage() {
                   <h1 className="text-2xl font-black text-slate-800 truncate">Hai {user ? user.name.split(" ")[0] : "Guest"},</h1>
                   <p className="text-slate-500 text-xs mt-0.5 truncate">{user ? user.email : "@tokomanis.official"}</p>
                 </div>
-                <button onClick={() => setActiveTab("wishlist")} className="relative p-2.5 bg-white border border-slate-200 rounded-full shadow-sm hover:bg-orange-50 transition-colors shrink-0">
-                  <Heart size={20} className="text-orange-500" fill={favorites.length > 0 ? "#f97316" : "none"} />
-                  {favorites.length > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center border border-white">{favorites.length}</span>}
-                </button>
+                {user && <button onClick={handleLogout} aria-label="Keluar dari akun" title="Keluar" className="shrink-0 rounded-full border border-rose-100 bg-white p-2.5 text-rose-500 shadow-sm transition hover:bg-rose-50">
+                  <LogOut size={20} />
+                </button>}
               </div>
 
               <div className="relative mb-6">
@@ -602,16 +684,16 @@ export default function ShopPage() {
                 </div>
               </div>
 
-              <div className="space-y-16 mt-6">
+              <div className="space-y-8 mt-5">
                 {groups.length === 0 ? (
                   <p className="text-center text-slate-400 text-sm mt-10">Pencarian tidak ditemukan.</p>
                 ) : groups.map(group => (
                   <div key={group.category}>
-                    <div className="flex justify-between items-center mb-16">
+                    <div className="flex justify-between items-center mb-3">
                       <h2 className="text-lg font-black text-slate-800">{group.category}</h2>
                       <button className="flex items-center text-[11px] font-bold text-slate-500 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm">All <ChevronRight size={14}/></button>
                     </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-16">
+                    <div className="grid grid-cols-2 gap-3 sm:gap-4">
                       {group.items.map((product) => <ProductCardGrid key={product.id} product={product} />)}
                     </div>
                   </div>
@@ -802,11 +884,19 @@ export default function ShopPage() {
           )}
 
         </main>
+        {activeTab === "home" && cartCount > 0 && (
+          <div className="pointer-events-none absolute bottom-4 left-[60px] right-0 z-30 px-3">
+            <button onClick={() => setActiveTab("cart")} aria-label={`Pesan Sekarang, ${cartCount} produk di keranjang`} className="pointer-events-auto flex w-full items-center justify-between gap-3 rounded-2xl bg-orange-500 px-4 py-3 text-left text-white shadow-xl shadow-orange-500/30 transition active:scale-[0.98]">
+              <span className="flex min-w-0 items-center gap-2"><ShoppingBasket size={20} className="shrink-0"/><span className="truncate text-sm font-black">Pesan Sekarang</span></span>
+              <span className="shrink-0 rounded-xl bg-white/20 px-2.5 py-1.5 text-[10px] font-bold">{cartCount} item · {formatRp(cartTotal)}</span>
+            </button>
+          </div>
+        )}
 
         {/* POPUP 1: DETAIL PRODUK */}
         {selectedProduct && !customizingProduct && (
           <div className="absolute inset-0 z-50 flex flex-col justify-end overflow-hidden">
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedProduct(null)} />
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { setSelectedProduct(null); setShareSheetOpen(false); }} />
             <div className="bg-white w-full max-h-[92%] rounded-t-[32px] p-5 pt-3 relative z-10 flex flex-col overflow-y-auto">
               <div className="w-12 h-1.5 bg-slate-300 rounded-full mx-auto mb-4" />
               <img src={selectedProduct.imageUrl || FALLBACK_PRODUCT_IMAGE} onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = FALLBACK_PRODUCT_IMAGE; }} alt={selectedProduct.name} className="w-full h-52 object-cover rounded-[24px] mb-4" />
@@ -820,12 +910,22 @@ export default function ShopPage() {
                   <Heart size={16} fill={favorites.includes(selectedProduct.id) ? "#f97316" : "none"} color={favorites.includes(selectedProduct.id) ? "#f97316" : "#475569"} />
                   {favorites.includes(selectedProduct.id) ? "Tersimpan" : "Simpan"}
                 </button>
-                <button onClick={() => alert("Link disalin!")} className="flex-1 flex items-center justify-center gap-2 border-2 border-slate-200 rounded-full py-3 font-bold text-sm text-slate-700 hover:bg-slate-50">
+                <button onClick={() => setShareSheetOpen(value => !value)} aria-expanded={shareSheetOpen} className="flex-1 flex items-center justify-center gap-2 border-2 border-slate-200 rounded-full py-3 font-bold text-sm text-slate-700 hover:bg-slate-50">
                   <Share2 size={16} /> Bagikan
                 </button>
               </div>
+              {shareSheetOpen && (
+                <div className="mt-3 grid grid-cols-3 gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+                  <button onClick={() => void handleShareProduct("whatsapp", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"><MessageCircle size={19}/></span>WhatsApp</button>
+                  <button onClick={() => void handleShareProduct("facebook", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-100 text-lg font-black text-blue-700">f</span>Facebook</button>
+                  <button onClick={() => void handleShareProduct("telegram", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-sky-100 text-sky-700"><Send size={18}/></span>Telegram</button>
+                  <button onClick={() => void handleShareProduct("x", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-base font-black text-white">𝕏</span>X</button>
+                  <button onClick={() => void handleShareProduct("native", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-orange-100 text-orange-700"><Share2 size={18}/></span>Aplikasi lain</button>
+                  <button onClick={() => void handleShareProduct("copy", selectedProduct)} className="flex flex-col items-center gap-1.5 rounded-xl bg-white p-2.5 text-[10px] font-bold text-slate-700 shadow-sm"><span className="flex h-9 w-9 items-center justify-center rounded-full bg-violet-100 text-violet-700"><Copy size={18}/></span>Salin link</button>
+                </div>
+              )}
               <button
-                onClick={() => { setCustomizingProduct(selectedProduct); setSelectedProduct(null); }}
+                onClick={() => { setCustomizingProduct(selectedProduct); setSelectedProduct(null); setShareSheetOpen(false); }}
                 disabled={selectedProduct.stock === 0}
                 className="w-full bg-orange-500 hover:bg-orange-600 text-white rounded-full py-4 mt-5 font-bold text-base shadow-lg shadow-orange-500/30 transition-all active:scale-95 disabled:bg-slate-400"
               >
