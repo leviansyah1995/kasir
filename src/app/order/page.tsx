@@ -189,10 +189,8 @@ export default function OrderPage() {
   const audioBufferPromisesRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
   const audioBufferLoadingRef = useRef<Set<string>>(new Set());
   const audioUnlockedRef = useRef(false);
+  const audioResumePendingRef = useRef(false);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const [audioNeedsGesture, setAudioNeedsGesture] = useState(false);
-  const audioNeedsGestureRef = useRef(false);
-  const [queuedSoundCount, setQueuedSoundCount] = useState(0);
   const audioQueueRef = useRef<Array<{ id: number; src: string | null; label: string }>>([]);
   const audioQueueSequenceRef = useRef(0);
   const activeAudioItemRef = useRef<number | null>(null);
@@ -212,11 +210,6 @@ export default function OrderPage() {
 
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
-  const syncQueueCount = () => setQueuedSoundCount(audioQueueRef.current.length);
-  const setGestureRequired = (required: boolean) => {
-    audioNeedsGestureRef.current = required;
-    setAudioNeedsGesture(required);
-  };
   const loadAudioBuffer = (src: string): Promise<AudioBuffer> => {
     const cached = audioBufferCacheRef.current.get(src);
     if (cached) return Promise.resolve(cached);
@@ -266,8 +259,6 @@ export default function OrderPage() {
     activeAudioItemRef.current = null;
     audioQueuePlayingRef.current = false;
     audioSourceRef.current = null;
-    syncQueueCount();
-    setGestureRequired(false);
     if (audioQueueRef.current.length > 0 && soundEnabledRef.current) {
       window.setTimeout(() => playNextQueuedAudio(), 100);
     }
@@ -284,16 +275,29 @@ export default function OrderPage() {
     activeAudioItemRef.current = next.id;
     let context: AudioContext;
     try { context = getOrderAudioContext(); }
-    catch (error) { console.error("Web Audio tidak tersedia:", error); setGestureRequired(true); return; }
+    catch (error) { console.error("Web Audio tidak tersedia:", error); return; }
     if (!audioUnlockedRef.current || context.state !== "running") {
-      if (!fromUserGesture) { setGestureRequired(true); return; }
+      let previouslyActivated = false;
+      try { previouslyActivated = localStorage.getItem("order_audio_activated_v1") === "true"; } catch {}
+      if (!fromUserGesture && previouslyActivated) {
+        // Setelah izin awal, coba pulihkan otomatis tanpa memunculkan prompt berulang.
+        if (audioResumePendingRef.current) return;
+        audioResumePendingRef.current = true;
+        void context.resume().then(() => {
+          if (context.state === "running") {
+            audioUnlockedRef.current = true;
+            playNextQueuedAudio();
+          }
+        }).catch(() => {}).finally(() => { audioResumePendingRef.current = false; });
+        return;
+      }
+      if (!fromUserGesture) return;
       void context.resume().then(() => {
         if (context.state === "running") {
           audioUnlockedRef.current = true;
-          setGestureRequired(false);
           playNextQueuedAudio(true);
-        } else setGestureRequired(true);
-      }).catch(() => setGestureRequired(true));
+        }
+      }).catch(() => {});
       return;
     }
     if (!next.src) {
@@ -327,12 +331,10 @@ export default function OrderPage() {
     setAudioSetupError("");
     soundEnabledRef.current = true;
     setSoundEnabled(true);
-    setGestureRequired(false);
     if (audioQueueRef.current.length === 0) {
       const src = sharedAudioUrlRef.current || customAudioDataRef.current;
       audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: "Tes suara" });
-      syncQueueCount();
-    }
+      }
     let context: AudioContext;
     try { context = getOrderAudioContext(); }
     catch (error: unknown) {
@@ -346,28 +348,43 @@ export default function OrderPage() {
     void context.resume().then(() => {
       if (context.state === "running") {
         audioUnlockedRef.current = true;
-        setGestureRequired(false);
         try { localStorage.setItem("order_audio_activated_v1", "true"); } catch {}
         setAudioSetupComplete(true);
         setAudioAccessChecked(true);
         playNextQueuedAudio(true);
       } else {
         setAudioSetupError("Browser belum mengizinkan suara. Tekan tombol sekali lagi atau periksa mode senyap perangkat.");
-        setGestureRequired(true);
       }
     }).catch(error => {
       console.warn("Audio perlu aktivasi ulang:", error);
       setAudioSetupError("Suara belum dapat diputar. Pastikan volume perangkat aktif lalu coba lagi.");
-      setGestureRequired(true);
     });
   };
   const enqueueOrderAudio = (orderNumber: string) => {
     if (!soundEnabledRef.current) return;
     const src = sharedAudioUrlRef.current || customAudioDataRef.current;
     audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: orderNumber });
-    syncQueueCount();
-    if (!audioUnlockedRef.current) setGestureRequired(true);
-    else playNextQueuedAudio();
+    playNextQueuedAudio();
+  };
+  const resumeOrderAudioFromInteraction = () => {
+    let previouslyActivated = false;
+    try { previouslyActivated = localStorage.getItem("order_audio_activated_v1") === "true"; } catch {}
+    if (!previouslyActivated || audioQueueRef.current.length === 0) return;
+    let context: AudioContext;
+    try { context = getOrderAudioContext(); } catch { return; }
+    if (context.state === "running") {
+      audioUnlockedRef.current = true;
+      playNextQueuedAudio(true);
+      return;
+    }
+    if (audioResumePendingRef.current) return;
+    audioResumePendingRef.current = true;
+    void context.resume().then(() => {
+      if (context.state === "running") {
+        audioUnlockedRef.current = true;
+        playNextQueuedAudio(true);
+      }
+    }).catch(() => {}).finally(() => { audioResumePendingRef.current = false; });
   };
   const validNotificationMp3 = (value: string) => {
     try {
@@ -977,7 +994,7 @@ export default function OrderPage() {
           <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-white/65">Browser perlu satu klik pertama agar musik notifikasi dapat diputar. Setelah tes berhasil, beranda pesanan terbuka dan refresh berikutnya tidak akan menampilkan pengingat ini lagi.</p>
           <button onClick={handleSoundActivationOrTest} className="mt-7 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-orange-400 px-5 text-sm font-black text-[#21140d] shadow-lg shadow-orange-950/30 transition hover:-translate-y-0.5 hover:bg-orange-300 active:translate-y-0"><Play size={17} fill="currentColor"/>Aktifkan suara & buka pesanan</button>
           {audioSetupError && <p role="alert" className="mt-4 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs leading-5 text-rose-100">{audioSetupError}</p>}
-          <p className="mt-5 text-[10px] leading-5 text-white/40">Jika browser menangguhkan suara saat perangkat lama tidak aktif, aktivasi hanya diminta lagi ketika ada bunyi pesanan yang benar-benar tertahan.</p>
+          <p className="mt-5 text-[10px] leading-5 text-white/40">Jika browser menangguhkan suara saat tab lama tidak aktif, aplikasi akan mencoba memulihkannya otomatis tanpa pengingat aktivasi berulang.</p>
         </section>
       </main>
     );
@@ -985,7 +1002,7 @@ export default function OrderPage() {
 
   // TAMPILAN UTAMA (LAYOUT SMARTPHONE & TABLET - MAX WIDTH 600px - 768px)
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col justify-between font-sans antialiased text-slate-800">
+    <div onPointerDownCapture={resumeOrderAudioFromInteraction} className="min-h-screen bg-slate-100 flex flex-col justify-between font-sans antialiased text-slate-800">
       
       {proofPreviewUrl && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4" onClick={() => setProofPreviewUrl(null)}><button aria-label="Tutup foto" className="absolute right-4 top-4 rounded-full bg-white/90 px-4 py-2 text-sm font-bold text-slate-900">Tutup</button><img src={proofPreviewUrl} alt="Bukti pembayaran ukuran besar" onClick={e => e.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-xl bg-white object-contain shadow-2xl" /></div>}
 
@@ -994,13 +1011,6 @@ export default function OrderPage() {
         <div className="fixed top-4 inset-x-4 max-w-sm mx-auto z-50 bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-semibold animate-in fade-in slide-in-from-top-2">
           <Bell size={16} className="text-orange-400 shrink-0" />
           <span className="flex-1">{toastMessage}</span>
-        </div>
-      )}
-      {audioNeedsGesture && queuedSoundCount > 0 && (
-        <div role="alert" className="fixed bottom-24 inset-x-3 z-[70] mx-auto max-w-md rounded-2xl border border-amber-300 bg-amber-50 p-3 shadow-2xl">
-          <p className="text-xs font-black text-amber-950">{queuedSoundCount} bunyi order menunggu diputar</p>
-          <p className="mt-0.5 text-[10px] text-amber-800">Chrome meminta klik pengguna sebelum audio dimulai.</p>
-          <button onClick={handleSoundActivationOrTest} className="mt-2 w-full rounded-xl bg-orange-600 px-3 py-2.5 text-xs font-black text-white">Aktifkan suara dan putar antrean</button>
         </div>
       )}
 
@@ -1015,7 +1025,7 @@ export default function OrderPage() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <button onClick={handleSoundActivationOrTest} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Aktifkan dan tes suara notifikasi" aria-label="Aktifkan dan tes suara notifikasi">
+            <button onClick={handleSoundActivationOrTest} className="rounded-xl border border-slate-200 bg-white p-2 text-slate-600" title="Tes suara notifikasi" aria-label="Tes suara notifikasi">
               <Play size={16} />
             </button>
             <button
@@ -1403,7 +1413,7 @@ export default function OrderPage() {
                   <input id="shared-order-audio-url" type="url" value={audioUrlDraft} onChange={e => setAudioUrlDraft(e.target.value)} placeholder={DEFAULT_ORDER_AUDIO_URL} disabled={!audioUrlLoaded} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:border-orange-400 disabled:opacity-60" />
                   <div className="flex gap-2">
                     <button onClick={saveSharedAudioUrl} disabled={audioUrlSaving || !audioUrlLoaded} className="flex-1 rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">{audioUrlSaving ? "Menyimpan…" : "Simpan untuk semua admin"}</button>
-                    <button onClick={handleSoundActivationOrTest} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white"><Play size={13} className="inline mr-1"/>Tes / Aktifkan</button>
+                    <button onClick={handleSoundActivationOrTest} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white"><Play size={13} className="inline mr-1"/>Tes suara</button>
                   </div>
                   <p className="text-[10px] leading-relaxed text-slate-500">URL harus HTTPS langsung ke file .mp3, bukan halaman GitHub. Mengosongkan lalu menyimpan akan memulihkan URL default.</p>
                   <p className="text-[10px] text-slate-600">Status: {!audioUrlLoaded ? "Memuat pengaturan…" : sharedAudioUrl === DEFAULT_ORDER_AUDIO_URL ? "MP3 default aktif" : "MP3 kustom bersama aktif"}{audioBufferLoading ? " • Memuat MP3…" : ""}</p>
