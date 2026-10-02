@@ -94,6 +94,7 @@ export default function ShopPage() {
   const [isClient, setIsClient] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const [isCheckingNetwork, setIsCheckingNetwork] = useState(false);
+  const [restaurantOpen, setRestaurantOpen] = useState<boolean | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [activeTab, setActiveTab] = useState<"home"|"active"|"history"|"settings"|"cart"|"wishlist">("home");
 
@@ -220,10 +221,14 @@ export default function ShopPage() {
 
     const unsubPaymentSettings = onValue(ref(db, "publicPaymentSettings"), (snap) => {
       const settings = snap.val() || {};
+      setRestaurantOpen(settings.restaurantOpen !== false);
       setQrisImageUrl(typeof settings.qrisImageUrl === "string" ? settings.qrisImageUrl : "");
       setTakeawayMapUrl(typeof settings.takeawayMapUrl === "string" ? settings.takeawayMapUrl : "");
       setPickupAddress(typeof settings.pickupAddress === "string" ? settings.pickupAddress : "");
-    }, (error) => console.error("Gagal memuat QRIS/lokasi toko:", error));
+    }, (error) => {
+      console.error("Gagal memuat QRIS/lokasi/status toko:", error);
+      setRestaurantOpen(true);
+    });
 
     let unsubOrders: (() => void) | undefined;
     if (user?.uid) {
@@ -475,6 +480,40 @@ export default function ShopPage() {
           {isCheckingNetwork ? "Mencari sinyal…" : "Coba sambungkan lagi"}
         </button>
         <p className="mt-4 text-[10px] text-slate-400">Janji, rotinya tidak ikut offline 🍞</p>
+      </section>
+    </main>
+  );
+
+  if (restaurantOpen === null) return (
+    <main className="fixed inset-0 z-[220] flex items-center justify-center bg-[#f7f3ed] text-slate-500">
+      <div className="flex items-center gap-3 rounded-full border border-white bg-white/80 px-5 py-3 text-xs font-bold shadow-sm"><RefreshCw size={16} className="animate-spin text-orange-500"/>Menyiapkan menu…</div>
+    </main>
+  );
+
+  if (restaurantOpen === false) return (
+    <main className="fixed inset-0 z-[220] flex items-center justify-center overflow-hidden bg-[#f7f3ed] px-5 py-8 text-center">
+      <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-orange-200/45 blur-3xl animate-pulse" />
+      <div className="pointer-events-none absolute -bottom-24 -right-20 h-80 w-80 rounded-full bg-amber-100/80 blur-3xl animate-pulse" />
+      <div className="pointer-events-none absolute left-[12%] top-[17%] h-2 w-2 rounded-full bg-orange-300 animate-ping" />
+      <div className="pointer-events-none absolute bottom-[18%] right-[15%] h-2.5 w-2.5 rounded-full bg-amber-400 animate-ping [animation-delay:700ms]" />
+      <section className="relative w-full max-w-md overflow-hidden rounded-[32px] border border-white bg-white/85 p-7 shadow-[0_24px_80px_rgba(77,48,22,0.12)] backdrop-blur-xl sm:p-10">
+        <div className="absolute -right-16 -top-20 h-48 w-48 rounded-full border border-orange-100/80" />
+        <div className="absolute -right-7 -top-11 h-32 w-32 rounded-full border border-orange-100/80" />
+        <div className="relative mx-auto mb-6 grid h-24 w-24 place-items-center rounded-[30px] bg-gradient-to-br from-orange-50 to-amber-100 text-orange-500 shadow-inner">
+          <div className="absolute inset-0 rounded-[30px] border border-orange-200/70 animate-pulse" />
+          <Clock size={39} strokeWidth={1.8} className="animate-[pulse_3s_ease-in-out_infinite]" />
+          <Sparkles size={17} className="absolute -right-1 -top-1 text-amber-500 animate-bounce" />
+        </div>
+        <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-[9px] font-black uppercase tracking-[.18em] text-slate-500"><span className="h-1.5 w-1.5 rounded-full bg-slate-400"/>Toko Manis · sementara tutup</span>
+        <h1 className="mt-5 text-[30px] font-black leading-[1.08] tracking-[-.04em] text-slate-900 sm:text-4xl">Kami sedang <span className="text-orange-500">beristirahat.</span></h1>
+        <p className="mx-auto mt-4 max-w-sm text-sm leading-6 text-slate-500">Maaf, resto sedang tutup dan pesanan belum bisa dibuat. Mampir lagi sebentar nanti, ya—kami akan menyambutmu dengan camilan hangat.</p>
+        <div className="mt-7 rounded-2xl border border-orange-100 bg-orange-50/80 p-4 text-left">
+          <div className="flex items-center gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-orange-500 shadow-sm"><RefreshCw size={17} className="animate-[spin_8s_linear_infinite]"/></div>
+            <div><b className="block text-xs font-extrabold text-slate-800">Tidak perlu refresh</b><span className="mt-1 block text-[10px] leading-4 text-slate-500">Halaman ini akan terbuka otomatis saat resto kembali buka.</span></div>
+          </div>
+        </div>
+        <div className="mt-7 flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400"><span className="h-px w-6 bg-orange-200"/>Terima kasih sudah mampir<span className="h-px w-6 bg-orange-200"/></div>
       </section>
     </main>
   );

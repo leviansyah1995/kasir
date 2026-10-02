@@ -179,6 +179,12 @@ export default function OrderPage() {
   const [audioUrlError, setAudioUrlError] = useState("");
   const [audioUrlLoaded, setAudioUrlLoaded] = useState(false);
   const [audioBufferLoading, setAudioBufferLoading] = useState(false);
+  const [audioAccessChecked, setAudioAccessChecked] = useState(false);
+  const [audioSetupComplete, setAudioSetupComplete] = useState(false);
+  const [audioSetupError, setAudioSetupError] = useState("");
+  const [restaurantOpen, setRestaurantOpen] = useState(true);
+  const [restaurantStatusLoaded, setRestaurantStatusLoaded] = useState(false);
+  const [restaurantStatusSaving, setRestaurantStatusSaving] = useState(false);
   const audioBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const audioBufferPromisesRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
   const audioBufferLoadingRef = useRef<Set<string>>(new Set());
@@ -318,6 +324,7 @@ export default function OrderPage() {
     }
   };
   const handleSoundActivationOrTest = () => {
+    setAudioSetupError("");
     soundEnabledRef.current = true;
     setSoundEnabled(true);
     setGestureRequired(false);
@@ -328,17 +335,29 @@ export default function OrderPage() {
     }
     let context: AudioContext;
     try { context = getOrderAudioContext(); }
-    catch (error: any) { showToast(error?.message || "Browser tidak mendukung audio."); return; }
-    // resume dipanggil langsung dari klik pengguna; setelah context running, buffer MP3
-    // dijalankan satu per satu tanpa perlu klik ulang untuk setiap order.
+    catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Browser tidak mendukung audio.";
+      setAudioSetupError(message);
+      showToast(message);
+      return;
+    }
+    // Panggilan resume dipicu oleh klik. Setelah bunyi tes berhasil dimulai,
+    // simpan izin lokal perangkat agar refresh berikutnya tidak menampilkan gate lagi.
     void context.resume().then(() => {
       if (context.state === "running") {
         audioUnlockedRef.current = true;
         setGestureRequired(false);
+        try { localStorage.setItem("order_audio_activated_v1", "true"); } catch {}
+        setAudioSetupComplete(true);
+        setAudioAccessChecked(true);
         playNextQueuedAudio(true);
-      } else setGestureRequired(true);
+      } else {
+        setAudioSetupError("Browser belum mengizinkan suara. Tekan tombol sekali lagi atau periksa mode senyap perangkat.");
+        setGestureRequired(true);
+      }
     }).catch(error => {
       console.warn("Audio perlu aktivasi ulang:", error);
+      setAudioSetupError("Suara belum dapat diputar. Pastikan volume perangkat aktif lalu coba lagi.");
       setGestureRequired(true);
     });
   };
@@ -383,27 +402,42 @@ export default function OrderPage() {
 
   // 1. Auth Observer (Tanpa Redirect Otomatis ke Shop saat Logout)
   useEffect(() => {
-    const savedAudio = localStorage.getItem("order_sound_data");
-    const savedAudioName = localStorage.getItem("order_sound_name");
-    if (savedAudio) {
-      customAudioDataRef.current = savedAudio;
-      setCustomAudioData(savedAudio);
-      setCustomAudioName(savedAudioName || "custom-audio.mp3");
-    }
-
     const unsubAuth = onAuthStateChanged(auth, (fu) => {
       setAuthLoading(false);
       if (fu) {
         if (fu.email?.toLowerCase() === ALLOWED_ADMIN_EMAIL.toLowerCase()) {
+          const savedAudio = localStorage.getItem("order_sound_data");
+          const savedAudioName = localStorage.getItem("order_sound_name");
+          if (savedAudio) {
+            customAudioDataRef.current = savedAudio;
+            setCustomAudioData(savedAudio);
+            setCustomAudioName(savedAudioName || "custom-audio.mp3");
+          }
+          const wasActivated = localStorage.getItem("order_audio_activated_v1") === "true";
+          setRestaurantStatusLoaded(false);
+          setAudioSetupComplete(wasActivated);
+          setAudioAccessChecked(true);
+          if (wasActivated) {
+            try {
+              const context = getOrderAudioContext();
+              void context.resume().then(() => { if (context.state === "running") audioUnlockedRef.current = true; }).catch(() => {});
+            } catch {}
+          }
           setAuthUser(fu);
           setLoginError(null);
         } else {
           setAuthUser(null);
+          setRestaurantStatusLoaded(false);
+          setAudioSetupComplete(false);
+          setAudioAccessChecked(false);
           setLoginError(`Email ${fu.email} tidak memiliki izin akses.`);
           signOut(auth);
         }
       } else {
         setAuthUser(null);
+        setRestaurantStatusLoaded(false);
+        setAudioSetupComplete(false);
+        setAudioAccessChecked(false);
       }
     });
 
@@ -426,6 +460,18 @@ export default function OrderPage() {
       console.error("Gagal membaca URL MP3 bersama:", error);
       setAudioUrlError("Tidak dapat membaca pengaturan bersama. Pastikan Firebase Rules memberi akses Admin ke settings.");
       setAudioUrlLoaded(true);
+    });
+    return () => unsubscribe();
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const unsubscribe = onValue(ref(db, "publicPaymentSettings/restaurantOpen"), snapshot => {
+      setRestaurantOpen(snapshot.val() !== false);
+      setRestaurantStatusLoaded(true);
+    }, error => {
+      console.error("Gagal membaca status resto:", error);
+      setRestaurantStatusLoaded(true);
     });
     return () => unsubscribe();
   }, [authUser]);
@@ -473,17 +519,33 @@ export default function OrderPage() {
         loaded.sort((a, b) => b.createdAt - a.createdAt);
         setOrders(loaded);
         const previous = orderStatusCache.current;
-        const pendingUnheard = loaded.filter(o => statusKind(o.status) === "pendingPayment" && !notifiedOrderIds.current.has(o.id));
-        const newProcessing = initialLoaded ? loaded.filter(o => statusKind(o.status) === "processing" && !previous.has(o.id) && !notifiedOrderIds.current.has(o.id)) : [];
-        const newlyArrived = [...pendingUnheard, ...newProcessing];
+        // Snapshot pertama setelah login/refresh hanyalah daftar pesanan yang sudah ada:
+        // tandai sebagai telah dilihat tanpa memutar ulang notifikasi lama.
+        if (!initialLoaded) {
+          loaded.forEach(order => notifiedOrderIds.current.add(order.id));
+          orderStatusCache.current = new Map(loaded.map(order => [order.id, order.status]));
+          try { sessionStorage.setItem("order_notified_ids", JSON.stringify([...notifiedOrderIds.current])); } catch {}
+          initialLoaded = true;
+          return;
+        }
+        const newlyArrived = loaded.filter(order => {
+          if (notifiedOrderIds.current.has(order.id)) return false;
+          const currentKind = statusKind(order.status);
+          const previousStatus = previous.get(order.id);
+          const previousKind = previousStatus ? statusKind(previousStatus) : "";
+          const isNewProcessingOrder = currentKind === "processing" && !previous.has(order.id);
+          const newlyPendingPayment = currentKind === "pendingPayment" && previousKind !== "pendingPayment";
+          return isNewProcessingOrder || newlyPendingPayment;
+        });
         if (newlyArrived.length > 0) {
           newlyArrived.forEach(order => enqueueOrderAudio(order.orderNumber));
-          showToast(pendingUnheard.length > 0 ? `Ada ${pendingUnheard.length} order menunggu verifikasi pembayaran!` : "Pesanan baru masuk!");
-          newlyArrived.forEach(o => notifiedOrderIds.current.add(o.id));
+          showToast(newlyArrived.some(order => statusKind(order.status) === "pendingPayment")
+            ? `Ada ${newlyArrived.length} order menunggu verifikasi pembayaran!`
+            : "Pesanan baru masuk!");
+          newlyArrived.forEach(order => notifiedOrderIds.current.add(order.id));
           try { sessionStorage.setItem("order_notified_ids", JSON.stringify([...notifiedOrderIds.current])); } catch {}
         }
-        orderStatusCache.current = new Map(loaded.map(o => [o.id, o.status]));
-        initialLoaded = true;
+        orderStatusCache.current = new Map(loaded.map(order => [order.id, order.status]));
       } else {
         setOrders([]);
         orderStatusCache.current = new Map();
@@ -550,6 +612,19 @@ export default function OrderPage() {
     proofObjectUrls.current.forEach(url => URL.revokeObjectURL(url));
     proofObjectUrls.current.clear();
   }, []);
+
+  const toggleRestaurantOpen = async () => {
+    if (!restaurantStatusLoaded || restaurantStatusSaving) return;
+    const nextState = !restaurantOpen;
+    setRestaurantStatusSaving(true);
+    try {
+      await set(ref(db, "publicPaymentSettings/restaurantOpen"), nextState);
+      showToast(nextState ? "Resto dibuka. Status Shop sudah diperbarui." : "Resto ditutup. Shop pelanggan sekarang menampilkan halaman tutup.");
+    } catch (error: unknown) {
+      console.error("Gagal mengubah status resto:", error);
+      showToast(error instanceof Error ? error.message : "Status resto gagal disimpan. Periksa koneksi dan izin Firebase.");
+    } finally { setRestaurantStatusSaving(false); }
+  };
 
   const handleLoginGoogle = async () => {
     setLoginError(null);
@@ -882,6 +957,29 @@ export default function OrderPage() {
           </div>
         </div>
       </div>
+    );
+  }
+
+  if (authUser && !audioAccessChecked) {
+    return <div className="flex min-h-screen items-center justify-center bg-slate-950"><div className="h-9 w-9 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" /></div>;
+  }
+
+  // Gerbang hanya muncul satu kali per browser/perangkat, sampai tes audio pertama berhasil.
+  if (authUser && !audioSetupComplete) {
+    return (
+      <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#19130f] px-5 py-10 text-white">
+        <div className="pointer-events-none absolute -left-24 -top-20 h-80 w-80 rounded-full bg-orange-500/15 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-28 -right-16 h-96 w-96 rounded-full bg-amber-300/10 blur-3xl" />
+        <section className="relative w-full max-w-md rounded-[30px] border border-white/10 bg-white/[.06] p-7 text-center shadow-2xl backdrop-blur-xl sm:p-9">
+          <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-[22px] border border-orange-300/20 bg-orange-400/10 text-orange-300"><Volume2 size={29}/></div>
+          <p className="text-[10px] font-black uppercase tracking-[.24em] text-orange-300">Satu kali untuk perangkat ini</p>
+          <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-3xl">Siapkan suara pesanan</h1>
+          <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-white/65">Browser perlu satu klik pertama agar musik notifikasi dapat diputar. Setelah tes berhasil, beranda pesanan terbuka dan refresh berikutnya tidak akan menampilkan pengingat ini lagi.</p>
+          <button onClick={handleSoundActivationOrTest} className="mt-7 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-orange-400 px-5 text-sm font-black text-[#21140d] shadow-lg shadow-orange-950/30 transition hover:-translate-y-0.5 hover:bg-orange-300 active:translate-y-0"><Play size={17} fill="currentColor"/>Aktifkan suara & buka pesanan</button>
+          {audioSetupError && <p role="alert" className="mt-4 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs leading-5 text-rose-100">{audioSetupError}</p>}
+          <p className="mt-5 text-[10px] leading-5 text-white/40">Jika browser menangguhkan suara saat perangkat lama tidak aktif, aktivasi hanya diminta lagi ketika ada bunyi pesanan yang benar-benar tertahan.</p>
+        </section>
+      </main>
     );
   }
 
@@ -1272,6 +1370,26 @@ export default function OrderPage() {
           {/* ======================================================== */}
           {activeTab === "pengaturan" && (
             <div className="space-y-4">
+
+              {/* STATUS BUKA/TUTUP RESTO DIBAGIKAN KE SHOP */}
+              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
+                <div className={`h-1.5 ${restaurantOpen ? "bg-emerald-400" : "bg-slate-400"}`} />
+                <div className="flex items-center gap-3 p-4">
+                  <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${restaurantOpen ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-500"}`}><Store size={20}/></div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-xs font-black uppercase tracking-wider text-slate-900">Status Operasional Resto</h3>
+                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{restaurantOpen ? "Resto buka — pelanggan dapat melihat menu dan memesan di Shop." : "Resto tutup — Shop menampilkan layar tutup dan checkout dinonaktifkan."}</p>
+                    {!restaurantStatusLoaded && <p className="mt-1 text-[10px] text-orange-600">Memuat status…</p>}
+                  </div>
+                  <button type="button" onClick={toggleRestaurantOpen} disabled={!restaurantStatusLoaded || restaurantStatusSaving} aria-pressed={restaurantOpen} className={`relative h-8 w-[58px] shrink-0 rounded-full p-1 transition-colors disabled:cursor-wait disabled:opacity-50 ${restaurantOpen ? "bg-emerald-500" : "bg-slate-400"}`} aria-label={restaurantOpen ? "Tutup resto" : "Buka resto"}>
+                    <span className={`block h-6 w-6 rounded-full bg-white shadow transition-transform ${restaurantOpen ? "translate-x-[26px]" : "translate-x-0"}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2.5 text-[10px]">
+                  <span className="font-bold text-slate-500">Status saat ini</span>
+                  <span className={`inline-flex items-center gap-1.5 font-black ${restaurantOpen ? "text-emerald-700" : "text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${restaurantOpen ? "bg-emerald-500" : "bg-slate-400"}`} />{restaurantStatusSaving ? "Menyimpan…" : restaurantOpen ? "BUKA" : "TUTUP"}</span>
+                </div>
+              </section>
               
               {/* 1. LINK MP3 BERSAMA UNTUK SEMUA PERANGKAT ADMIN */}
               <div className="bg-white rounded-2xl p-4 border border-slate-200 space-y-3 shadow-xs">
