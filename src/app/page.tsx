@@ -19,6 +19,14 @@ type PromoProduct = {
   active?: boolean;
 };
 
+type LandingDesign = { brandName: string; title: string; description: string; ctaLabel: string; heroImage: string };
+const DEFAULT_LANDING_DESIGN: LandingDesign = {
+  brandName: "Toko Manis",
+  title: "Ada hari yang butuh manis lebih.",
+  description: "Terang bulan hangat, topping berlimpah, dan camilan yang bikin momen sederhana terasa istimewa.",
+  ctaLabel: "Pilih menu & pesan",
+  heroImage: "/images/terang-bulan-hero.jpg",
+};
 const HERO_IMAGE = "/images/terang-bulan-hero.jpg";
 const stringValue = (...values: unknown[]) => values.find((value): value is string => typeof value === "string" && value.length > 0) || "";
 const formatRp = (value: number) => `Rp ${Math.round(Number(value) || 0).toLocaleString("id-ID")}`;
@@ -31,7 +39,22 @@ const steps = [
 
 export default function HomePage() {
   const [products, setProducts] = useState<PromoProduct[]>([]);
+  const [landingDesign, setLandingDesign] = useState<LandingDesign>(DEFAULT_LANDING_DESIGN);
   const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onValue(ref(db, "publicPaymentSettings/landingPage"), snapshot => {
+      const saved = (snapshot.val() || {}) as Record<string, unknown>;
+      setLandingDesign({
+        brandName: stringValue(saved.brandName) || DEFAULT_LANDING_DESIGN.brandName,
+        title: stringValue(saved.title) || DEFAULT_LANDING_DESIGN.title,
+        description: stringValue(saved.description) || DEFAULT_LANDING_DESIGN.description,
+        ctaLabel: stringValue(saved.ctaLabel) || DEFAULT_LANDING_DESIGN.ctaLabel,
+        heroImage: stringValue(saved.heroImage) || DEFAULT_LANDING_DESIGN.heroImage,
+      });
+    }, error => console.warn("Pengaturan tampilan landing belum dapat dimuat:", error));
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onValue(ref(db, "products"), snapshot => {
@@ -55,6 +78,12 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    document.title = `${landingDesign.brandName} — ${landingDesign.title}`;
+    const descriptionTag = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+    if (descriptionTag) descriptionTag.content = landingDesign.description;
+  }, [landingDesign.brandName, landingDesign.title, landingDesign.description]);
+
+  useEffect(() => {
     const elements = Array.from(document.querySelectorAll<HTMLElement>("[data-reveal]"));
     if (!("IntersectionObserver" in window)) {
       elements.forEach(element => element.classList.add("is-visible"));
@@ -76,9 +105,9 @@ export default function HomePage() {
     <main className="promo-site min-h-screen overflow-hidden">
       <header className="promo-nav-wrap">
         <nav className="promo-nav mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-          <Link href="/" className="flex items-center gap-3" aria-label="Toko Manis, beranda">
-            <span className="promo-mark">M<span>.</span></span>
-            <span className="leading-tight"><b className="block text-[15px] font-black tracking-tight">TOKO MANIS</b><small className="text-[9px] font-semibold tracking-[.22em] text-[#9b8372]">KUDAPAN HANGAT</small></span>
+          <Link href="/" className="flex items-center gap-3" aria-label={`${landingDesign.brandName}, beranda`}>
+            <span className="promo-mark">{landingDesign.brandName.trim().charAt(0).toUpperCase() || "M"}<span>.</span></span>
+            <span className="leading-tight"><b className="block text-[15px] font-black tracking-tight">{landingDesign.brandName.toUpperCase()}</b><small className="text-[9px] font-semibold tracking-[.22em] text-[#9b8372]">KUDAPAN HANGAT</small></span>
           </Link>
           <div className="hidden items-center gap-8 md:flex">
             <a href="#menu" className="promo-nav-link">Menu favorit</a>
@@ -86,7 +115,7 @@ export default function HomePage() {
             <a href="#cara-pesan" className="promo-nav-link">Cara pesan</a>
           </div>
           <div className="flex items-center gap-2">
-            <Link href="/shop" className="promo-nav-cta hidden sm:inline-flex">Pesan sekarang <ArrowRight size={15}/></Link>
+            <Link href="/shop" className="promo-nav-cta hidden sm:inline-flex">{landingDesign.ctaLabel} <ArrowRight size={15}/></Link>
             <button className="promo-menu-button md:hidden" aria-label={menuOpen ? "Tutup menu" : "Buka menu"} onClick={() => setMenuOpen(value => !value)}>{menuOpen ? <X size={20}/> : <Menu size={20}/>}</button>
           </div>
         </nav>
@@ -94,7 +123,7 @@ export default function HomePage() {
           <a href="#menu" onClick={() => setMenuOpen(false)}>Menu favorit</a>
           <a href="#cerita" onClick={() => setMenuOpen(false)}>Cerita rasa</a>
           <a href="#cara-pesan" onClick={() => setMenuOpen(false)}>Cara pesan</a>
-          <Link href="/shop" onClick={() => setMenuOpen(false)}>Pesan sekarang <ArrowRight size={15}/></Link>
+          <Link href="/shop" onClick={() => setMenuOpen(false)}>{landingDesign.ctaLabel} <ArrowRight size={15}/></Link>
         </div>}
       </header>
 
@@ -105,10 +134,10 @@ export default function HomePage() {
         <div className="relative mx-auto grid min-h-[690px] max-w-7xl items-center gap-4 px-5 pb-16 pt-12 sm:px-8 lg:min-h-[720px] lg:grid-cols-[.92fr_1.08fr] lg:gap-8 lg:pb-20 lg:pt-10">
           <div className="promo-hero-copy relative z-10 max-w-2xl">
             <div className="promo-eyebrow"><span className="promo-eyebrow-dot"/> MANISNYA SELALU PUNYA CERITA</div>
-            <h1 className="promo-title mt-6">Ada hari yang butuh <em>manis</em> lebih.</h1>
-            <p className="mt-6 max-w-lg text-base leading-7 text-[#d8c8b9] sm:text-lg sm:leading-8">Terang bulan hangat, topping berlimpah, dan camilan yang bikin momen sederhana terasa istimewa.</p>
+            <h1 className="promo-title mt-6">{landingDesign.title}</h1>
+            <p className="mt-6 max-w-lg text-base leading-7 text-[#d8c8b9] sm:text-lg sm:leading-8">{landingDesign.description}</p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link href="/shop" className="promo-primary-button">Pilih menu & pesan <ArrowRight size={17}/></Link>
+              <Link href="/shop" className="promo-primary-button">{landingDesign.ctaLabel} <ArrowRight size={17}/></Link>
               <a href="#menu" className="promo-secondary-button">Jelajahi menu <ArrowDownRight size={17}/></a>
             </div>
             <div className="mt-9 flex flex-wrap items-center gap-x-6 gap-y-3 text-[11px] font-semibold text-[#c9b8a8] sm:text-xs">
@@ -119,7 +148,7 @@ export default function HomePage() {
 
           <div className="promo-hero-art relative mx-auto mt-7 w-full max-w-[590px] lg:mt-0">
             <div className="promo-image-frame">
-              <img src={HERO_IMAGE} alt="Terang bulan hangat dengan topping cokelat dan keju" className="promo-hero-image" />
+              <img src={landingDesign.heroImage} alt={`${landingDesign.brandName} — foto produk unggulan`} className="promo-hero-image" />
               <div className="promo-image-shade" />
               <div className="promo-image-caption"><span>HANGAT DARI DAPUR</span><b>Potongan kecil, bahagia besar.</b></div>
             </div>
@@ -182,7 +211,7 @@ export default function HomePage() {
       <section id="cerita" className="promo-story-section px-5 py-20 sm:px-8 sm:py-28">
         <div className="mx-auto grid max-w-7xl items-center gap-12 lg:grid-cols-2 lg:gap-20">
           <div className="promo-story-art" data-reveal>
-            <img src={HERO_IMAGE} alt="Terang bulan dibagi untuk dinikmati bersama" />
+            <img src={landingDesign.heroImage} alt={`${landingDesign.brandName} — suasana menikmati menu`} />
             <div className="promo-story-badge"><span>MANIS</span><b>di setiap<br/>potongan</b><Sparkles size={18}/></div>
             <span className="promo-story-decoration" aria-hidden="true">✳</span>
           </div>
@@ -226,7 +255,7 @@ export default function HomePage() {
 
       <footer className="promo-footer px-5 py-7 sm:px-8">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 text-center sm:flex-row sm:text-left">
-          <Link href="/" className="flex items-center gap-2"><span className="promo-mark promo-mark-small">M<span>.</span></span><b className="text-xs font-black tracking-widest">TOKO MANIS</b></Link>
+          <Link href="/" className="flex items-center gap-2"><span className="promo-mark promo-mark-small">{landingDesign.brandName.trim().charAt(0).toUpperCase() || "M"}<span>.</span></span><b className="text-xs font-black tracking-widest">{landingDesign.brandName.toUpperCase()}</b></Link>
           <p className="text-[10px] text-[#b9a99a]">Satu gigitan, satu alasan untuk tersenyum.</p>
           <Link href="/shop" className="text-[10px] font-bold uppercase tracking-[.15em] text-[#f4a15a]">Pesan melalui Shop <ChevronRight size={13} className="inline"/></Link>
         </div>

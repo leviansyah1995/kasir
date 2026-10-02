@@ -219,14 +219,19 @@ export default function ShopPage() {
       setProducts(list);
     }, (error) => console.error("Gagal memuat produk Shop:", error));
 
-    const unsubPaymentSettings = onValue(ref(db, "publicPaymentSettings"), (snap) => {
-      const settings = snap.val() || {};
-      setRestaurantOpen(settings.restaurantOpen !== false);
-      setQrisImageUrl(typeof settings.qrisImageUrl === "string" ? settings.qrisImageUrl : "");
-      setTakeawayMapUrl(typeof settings.takeawayMapUrl === "string" ? settings.takeawayMapUrl : "");
-      setPickupAddress(typeof settings.pickupAddress === "string" ? settings.pickupAddress : "");
-    }, (error) => {
-      console.error("Gagal memuat QRIS/lokasi/status toko:", error);
+    const unsubQrisSettings = onValue(ref(db, "publicPaymentSettings/qrisImageUrl"), snap => {
+      setQrisImageUrl(typeof snap.val() === "string" ? snap.val() : "");
+    }, error => console.error("Gagal memuat QRIS:", error));
+    const unsubPickupAddress = onValue(ref(db, "publicPaymentSettings/pickupAddress"), snap => {
+      setPickupAddress(typeof snap.val() === "string" ? snap.val() : "");
+    }, error => console.error("Gagal memuat alamat toko:", error));
+    const unsubTakeawayMap = onValue(ref(db, "publicPaymentSettings/takeawayMapUrl"), snap => {
+      setTakeawayMapUrl(typeof snap.val() === "string" ? snap.val() : "");
+    }, error => console.error("Gagal memuat peta toko:", error));
+    const unsubRestaurantStatus = onValue(ref(db, "publicPaymentSettings/restaurantOpen"), snap => {
+      setRestaurantOpen(snap.val() !== false);
+    }, error => {
+      console.error("Gagal memuat status resto:", error);
       setRestaurantOpen(true);
     });
 
@@ -246,7 +251,7 @@ export default function ShopPage() {
       setOrders([]);
     }
 
-    return () => { unsubProducts(); unsubPaymentSettings(); unsubOrders?.(); };
+    return () => { unsubProducts(); unsubQrisSettings(); unsubPickupAddress(); unsubTakeawayMap(); unsubRestaurantStatus(); unsubOrders?.(); };
   }, [user?.uid]);
 
   useEffect(() => {

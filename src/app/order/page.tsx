@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
 import { 
   Bell, Volume2, VolumeX, Upload, Download, Trash2, Printer, 
   Clock, CheckCircle2, XCircle, Settings, Store, ShoppingBag, 
   DollarSign, Users, UserX, LogOut, ChevronRight, Search, 
-  Flame, Check, Play, ShieldAlert, FileSpreadsheet, MessageCircle
+  Flame, Check, Play, ShieldAlert, FileSpreadsheet, MessageCircle, Sparkles
 } from "lucide-react";
 import { auth, db } from "../../lib/firebase";
 import * as XLSX from "xlsx";
@@ -61,6 +61,22 @@ interface ShopUser {
   address?: string;
   createdAt?: number;
 }
+
+interface LandingDesignSettings {
+  brandName: string;
+  title: string;
+  description: string;
+  ctaLabel: string;
+  heroImage: string;
+}
+
+const DEFAULT_LANDING_DESIGN: LandingDesignSettings = {
+  brandName: "Toko Manis",
+  title: "Ada hari yang butuh manis lebih.",
+  description: "Terang bulan hangat, topping berlimpah, dan camilan yang bikin momen sederhana terasa istimewa.",
+  ctaLabel: "Pilih menu & pesan",
+  heroImage: "/images/terang-bulan-hero.jpg",
+};
 
 const formatRp = (n: number) => "Rp " + (n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
@@ -179,17 +195,21 @@ export default function OrderPage() {
   const [audioUrlError, setAudioUrlError] = useState("");
   const [audioUrlLoaded, setAudioUrlLoaded] = useState(false);
   const [audioBufferLoading, setAudioBufferLoading] = useState(false);
-  const [audioAccessChecked, setAudioAccessChecked] = useState(false);
-  const [audioSetupComplete, setAudioSetupComplete] = useState(false);
+  const [audioNeedsGesture, setAudioNeedsGesture] = useState(true);
+  const [queuedSoundCount, setQueuedSoundCount] = useState(0);
   const [audioSetupError, setAudioSetupError] = useState("");
   const [restaurantOpen, setRestaurantOpen] = useState(true);
   const [restaurantStatusLoaded, setRestaurantStatusLoaded] = useState(false);
   const [restaurantStatusSaving, setRestaurantStatusSaving] = useState(false);
+  const [landingDesignDraft, setLandingDesignDraft] = useState<LandingDesignSettings>(DEFAULT_LANDING_DESIGN);
+  const [landingDesignLoaded, setLandingDesignLoaded] = useState(false);
+  const [landingDesignSaving, setLandingDesignSaving] = useState(false);
+  const [landingImageProcessing, setLandingImageProcessing] = useState(false);
   const audioBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const audioBufferPromisesRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
   const audioBufferLoadingRef = useRef<Set<string>>(new Set());
   const audioUnlockedRef = useRef(false);
-  const audioResumePendingRef = useRef(false);
+  const audioNeedsGestureRef = useRef(true);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const audioQueueRef = useRef<Array<{ id: number; src: string | null; label: string }>>([]);
   const audioQueueSequenceRef = useRef(0);
@@ -209,6 +229,12 @@ export default function OrderPage() {
   };
 
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+
+  const syncQueueCount = () => setQueuedSoundCount(audioQueueRef.current.length);
+  const setGestureRequired = (required: boolean) => {
+    audioNeedsGestureRef.current = required;
+    setAudioNeedsGesture(required);
+  };
 
   const loadAudioBuffer = (src: string): Promise<AudioBuffer> => {
     const cached = audioBufferCacheRef.current.get(src);
@@ -259,6 +285,8 @@ export default function OrderPage() {
     activeAudioItemRef.current = null;
     audioQueuePlayingRef.current = false;
     audioSourceRef.current = null;
+    syncQueueCount();
+    if (audioQueueRef.current.length === 0) setGestureRequired(false);
     if (audioQueueRef.current.length > 0 && soundEnabledRef.current) {
       window.setTimeout(() => playNextQueuedAudio(), 100);
     }
@@ -277,27 +305,17 @@ export default function OrderPage() {
     try { context = getOrderAudioContext(); }
     catch (error) { console.error("Web Audio tidak tersedia:", error); return; }
     if (!audioUnlockedRef.current || context.state !== "running") {
-      let previouslyActivated = false;
-      try { previouslyActivated = localStorage.getItem("order_audio_activated_v1") === "true"; } catch {}
-      if (!fromUserGesture && previouslyActivated) {
-        // Setelah izin awal, coba pulihkan otomatis tanpa memunculkan prompt berulang.
-        if (audioResumePendingRef.current) return;
-        audioResumePendingRef.current = true;
-        void context.resume().then(() => {
-          if (context.state === "running") {
-            audioUnlockedRef.current = true;
-            playNextQueuedAudio();
-          }
-        }).catch(() => {}).finally(() => { audioResumePendingRef.current = false; });
+      if (!fromUserGesture) {
+        setGestureRequired(true);
         return;
       }
-      if (!fromUserGesture) return;
       void context.resume().then(() => {
         if (context.state === "running") {
           audioUnlockedRef.current = true;
+          setGestureRequired(false);
           playNextQueuedAudio(true);
-        }
-      }).catch(() => {});
+        } else setGestureRequired(true);
+      }).catch(() => setGestureRequired(true));
       return;
     }
     if (!next.src) {
@@ -334,57 +352,37 @@ export default function OrderPage() {
     if (audioQueueRef.current.length === 0) {
       const src = sharedAudioUrlRef.current || customAudioDataRef.current;
       audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: "Tes suara" });
-      }
+      syncQueueCount();
+    }
     let context: AudioContext;
     try { context = getOrderAudioContext(); }
     catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Browser tidak mendukung audio.";
       setAudioSetupError(message);
-      showToast(message);
       return;
     }
-    // Panggilan resume dipicu oleh klik. Setelah bunyi tes berhasil dimulai,
-    // simpan izin lokal perangkat agar refresh berikutnya tidak menampilkan gate lagi.
+    // Browser perlu klik ulang setelah refresh; aktivasi ini tidak disimpan antar-muat halaman.
     void context.resume().then(() => {
       if (context.state === "running") {
         audioUnlockedRef.current = true;
-        try { localStorage.setItem("order_audio_activated_v1", "true"); } catch {}
-        setAudioSetupComplete(true);
-        setAudioAccessChecked(true);
+        setGestureRequired(false);
         playNextQueuedAudio(true);
       } else {
-        setAudioSetupError("Browser belum mengizinkan suara. Tekan tombol sekali lagi atau periksa mode senyap perangkat.");
+        setAudioSetupError("Browser belum mengizinkan suara. Coba aktifkan lagi atau periksa mode senyap perangkat.");
+        setGestureRequired(true);
       }
     }).catch(error => {
-      console.warn("Audio perlu aktivasi ulang:", error);
+      console.warn("Audio perlu aktivasi:", error);
       setAudioSetupError("Suara belum dapat diputar. Pastikan volume perangkat aktif lalu coba lagi.");
+      setGestureRequired(true);
     });
   };
   const enqueueOrderAudio = (orderNumber: string) => {
     if (!soundEnabledRef.current) return;
     const src = sharedAudioUrlRef.current || customAudioDataRef.current;
     audioQueueRef.current.push({ id: ++audioQueueSequenceRef.current, src, label: orderNumber });
+    syncQueueCount();
     playNextQueuedAudio();
-  };
-  const resumeOrderAudioFromInteraction = () => {
-    let previouslyActivated = false;
-    try { previouslyActivated = localStorage.getItem("order_audio_activated_v1") === "true"; } catch {}
-    if (!previouslyActivated || audioQueueRef.current.length === 0) return;
-    let context: AudioContext;
-    try { context = getOrderAudioContext(); } catch { return; }
-    if (context.state === "running") {
-      audioUnlockedRef.current = true;
-      playNextQueuedAudio(true);
-      return;
-    }
-    if (audioResumePendingRef.current) return;
-    audioResumePendingRef.current = true;
-    void context.resume().then(() => {
-      if (context.state === "running") {
-        audioUnlockedRef.current = true;
-        playNextQueuedAudio(true);
-      }
-    }).catch(() => {}).finally(() => { audioResumePendingRef.current = false; });
   };
   const validNotificationMp3 = (value: string) => {
     try {
@@ -430,31 +428,25 @@ export default function OrderPage() {
             setCustomAudioData(savedAudio);
             setCustomAudioName(savedAudioName || "custom-audio.mp3");
           }
-          const wasActivated = localStorage.getItem("order_audio_activated_v1") === "true";
           setRestaurantStatusLoaded(false);
-          setAudioSetupComplete(wasActivated);
-          setAudioAccessChecked(true);
-          if (wasActivated) {
-            try {
-              const context = getOrderAudioContext();
-              void context.resume().then(() => { if (context.state === "running") audioUnlockedRef.current = true; }).catch(() => {});
-            } catch {}
-          }
+          setLandingDesignLoaded(false);
+          audioUnlockedRef.current = false;
+          setGestureRequired(true);
           setAuthUser(fu);
           setLoginError(null);
         } else {
           setAuthUser(null);
           setRestaurantStatusLoaded(false);
-          setAudioSetupComplete(false);
-          setAudioAccessChecked(false);
+          setLandingDesignLoaded(false);
           setLoginError(`Email ${fu.email} tidak memiliki izin akses.`);
           signOut(auth);
         }
       } else {
         setAuthUser(null);
         setRestaurantStatusLoaded(false);
-        setAudioSetupComplete(false);
-        setAudioAccessChecked(false);
+        setLandingDesignLoaded(false);
+        audioUnlockedRef.current = false;
+        setGestureRequired(true);
       }
     });
 
@@ -489,6 +481,25 @@ export default function OrderPage() {
     }, error => {
       console.error("Gagal membaca status resto:", error);
       setRestaurantStatusLoaded(true);
+    });
+    return () => unsubscribe();
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const unsubscribe = onValue(ref(db, "publicPaymentSettings/landingPage"), snapshot => {
+      const saved = (snapshot.val() || {}) as Partial<LandingDesignSettings>;
+      setLandingDesignDraft({
+        brandName: saved.brandName || DEFAULT_LANDING_DESIGN.brandName,
+        title: saved.title || DEFAULT_LANDING_DESIGN.title,
+        description: saved.description || DEFAULT_LANDING_DESIGN.description,
+        ctaLabel: saved.ctaLabel || DEFAULT_LANDING_DESIGN.ctaLabel,
+        heroImage: saved.heroImage || DEFAULT_LANDING_DESIGN.heroImage,
+      });
+      setLandingDesignLoaded(true);
+    }, error => {
+      console.error("Gagal memuat pengaturan landing page:", error);
+      setLandingDesignLoaded(true);
     });
     return () => unsubscribe();
   }, [authUser]);
@@ -629,6 +640,65 @@ export default function OrderPage() {
     proofObjectUrls.current.forEach(url => URL.revokeObjectURL(url));
     proofObjectUrls.current.clear();
   }, []);
+
+  const handleLandingImageUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { showToast("Pilih file gambar terlebih dahulu."); return; }
+    setLandingImageProcessing(true);
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.src = objectUrl;
+      await image.decode();
+      const scale = Math.min(1, 1400 / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Gambar tidak dapat diproses di browser ini.");
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(result => result ? resolve(result) : reject(new Error("Gagal mengoptimalkan gambar.")), "image/jpeg", 0.78));
+      if (blob.size > 850_000) throw new Error("Gambar masih terlalu besar setelah optimasi. Pilih gambar lain yang lebih ringan.");
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Gambar tidak dapat dibaca."));
+        reader.onerror = () => reject(reader.error || new Error("Gambar tidak dapat dibaca."));
+        reader.readAsDataURL(blob);
+      });
+      setLandingDesignDraft(current => ({ ...current, heroImage: dataUrl }));
+      showToast("Gambar landing siap. Tekan Simpan untuk menayangkannya.");
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : "Gagal memproses gambar.");
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      setLandingImageProcessing(false);
+    }
+  };
+
+  const saveLandingDesign = async () => {
+    if (!landingDesignLoaded || landingDesignSaving) return;
+    if (!landingDesignDraft.brandName.trim() || !landingDesignDraft.title.trim() || !landingDesignDraft.description.trim() || !landingDesignDraft.ctaLabel.trim()) {
+      showToast("Nama brand, judul, deskripsi, dan teks tombol harus diisi.");
+      return;
+    }
+    setLandingDesignSaving(true);
+    try {
+      await update(ref(db, "publicPaymentSettings/landingPage"), {
+        brandName: landingDesignDraft.brandName.trim(),
+        title: landingDesignDraft.title.trim(),
+        description: landingDesignDraft.description.trim(),
+        ctaLabel: landingDesignDraft.ctaLabel.trim(),
+        heroImage: landingDesignDraft.heroImage,
+        updatedAt: Date.now(),
+      });
+      showToast("Desain landing page tersimpan dan akan diperbarui di leviankitchen.pages.dev.");
+    } catch (error: unknown) {
+      console.error("Gagal menyimpan desain landing page:", error);
+      showToast(error instanceof Error ? error.message : "Desain landing gagal disimpan.");
+    } finally { setLandingDesignSaving(false); }
+  };
 
   const toggleRestaurantOpen = async () => {
     if (!restaurantStatusLoaded || restaurantStatusSaving) return;
@@ -977,32 +1047,9 @@ export default function OrderPage() {
     );
   }
 
-  if (authUser && !audioAccessChecked) {
-    return <div className="flex min-h-screen items-center justify-center bg-slate-950"><div className="h-9 w-9 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" /></div>;
-  }
-
-  // Gerbang hanya muncul satu kali per browser/perangkat, sampai tes audio pertama berhasil.
-  if (authUser && !audioSetupComplete) {
-    return (
-      <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#19130f] px-5 py-10 text-white">
-        <div className="pointer-events-none absolute -left-24 -top-20 h-80 w-80 rounded-full bg-orange-500/15 blur-3xl" />
-        <div className="pointer-events-none absolute -bottom-28 -right-16 h-96 w-96 rounded-full bg-amber-300/10 blur-3xl" />
-        <section className="relative w-full max-w-md rounded-[30px] border border-white/10 bg-white/[.06] p-7 text-center shadow-2xl backdrop-blur-xl sm:p-9">
-          <div className="mx-auto mb-6 grid h-16 w-16 place-items-center rounded-[22px] border border-orange-300/20 bg-orange-400/10 text-orange-300"><Volume2 size={29}/></div>
-          <p className="text-[10px] font-black uppercase tracking-[.24em] text-orange-300">Satu kali untuk perangkat ini</p>
-          <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-3xl">Siapkan suara pesanan</h1>
-          <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-white/65">Browser perlu satu klik pertama agar musik notifikasi dapat diputar. Setelah tes berhasil, beranda pesanan terbuka dan refresh berikutnya tidak akan menampilkan pengingat ini lagi.</p>
-          <button onClick={handleSoundActivationOrTest} className="mt-7 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-orange-400 px-5 text-sm font-black text-[#21140d] shadow-lg shadow-orange-950/30 transition hover:-translate-y-0.5 hover:bg-orange-300 active:translate-y-0"><Play size={17} fill="currentColor"/>Aktifkan suara & buka pesanan</button>
-          {audioSetupError && <p role="alert" className="mt-4 rounded-xl border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs leading-5 text-rose-100">{audioSetupError}</p>}
-          <p className="mt-5 text-[10px] leading-5 text-white/40">Jika browser menangguhkan suara saat tab lama tidak aktif, aplikasi akan mencoba memulihkannya otomatis tanpa pengingat aktivasi berulang.</p>
-        </section>
-      </main>
-    );
-  }
-
   // TAMPILAN UTAMA (LAYOUT SMARTPHONE & TABLET - MAX WIDTH 600px - 768px)
   return (
-    <div onPointerDownCapture={resumeOrderAudioFromInteraction} className="min-h-screen bg-slate-100 flex flex-col justify-between font-sans antialiased text-slate-800">
+    <div className="min-h-screen bg-slate-100 flex flex-col justify-between font-sans antialiased text-slate-800">
       
       {proofPreviewUrl && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4" onClick={() => setProofPreviewUrl(null)}><button aria-label="Tutup foto" className="absolute right-4 top-4 rounded-full bg-white/90 px-4 py-2 text-sm font-bold text-slate-900">Tutup</button><img src={proofPreviewUrl} alt="Bukti pembayaran ukuran besar" onClick={e => e.stopPropagation()} className="max-h-[88vh] max-w-[94vw] rounded-xl bg-white object-contain shadow-2xl" /></div>}
 
@@ -1011,6 +1058,19 @@ export default function OrderPage() {
         <div className="fixed top-4 inset-x-4 max-w-sm mx-auto z-50 bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-semibold animate-in fade-in slide-in-from-top-2">
           <Bell size={16} className="text-orange-400 shrink-0" />
           <span className="flex-1">{toastMessage}</span>
+        </div>
+      )}
+      {audioNeedsGesture && (
+        <div role="status" className="fixed bottom-24 inset-x-3 z-[70] mx-auto max-w-md rounded-[24px] border border-amber-300 bg-amber-50 p-3.5 shadow-[0_15px_40px_rgba(58,36,13,.18)]">
+          <div className="flex items-start gap-2.5">
+            <Volume2 size={19} className="mt-0.5 shrink-0 text-orange-600" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-black text-amber-950">{queuedSoundCount > 0 ? `${queuedSoundCount} bunyi order menunggu diputar` : "Aktifkan suara notifikasi"}</p>
+              <p className="mt-1 text-[11px] leading-5 text-amber-800">{queuedSoundCount > 0 ? "Klik untuk mengaktifkan suara dan memutar antrean pesanan." : "Klik sekali untuk tes suara. Setelah refresh, browser mungkin meminta aktivasi lagi."}</p>
+            </div>
+          </div>
+          <button onClick={handleSoundActivationOrTest} className="mt-3 w-full rounded-2xl bg-orange-600 px-4 py-3 text-sm font-black text-white transition hover:bg-orange-700 active:scale-[.99]">{queuedSoundCount > 0 ? "Aktifkan suara & putar antrean" : "Aktifkan suara"}</button>
+          {audioSetupError && <p role="alert" className="mt-2 text-[11px] font-semibold text-red-700">{audioSetupError}</p>}
         </div>
       )}
 
@@ -1398,6 +1458,34 @@ export default function OrderPage() {
                 <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2.5 text-[10px]">
                   <span className="font-bold text-slate-500">Status saat ini</span>
                   <span className={`inline-flex items-center gap-1.5 font-black ${restaurantOpen ? "text-emerald-700" : "text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${restaurantOpen ? "bg-emerald-500" : "bg-slate-400"}`} />{restaurantStatusSaving ? "Menyimpan…" : restaurantOpen ? "BUKA" : "TUTUP"}</span>
+                </div>
+              </section>
+
+              {/* PENGATURAN KONTEN LANDING PAGE */}
+              <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
+                <div className="mb-3 flex items-start gap-3">
+                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-violet-50 text-violet-600"><Sparkles size={19}/></div>
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-wider text-slate-900">Desain Landing Page</h3>
+                    <p className="mt-1 text-[10px] leading-4 text-slate-500">Atur teks dan foto yang tampil di leviankitchen.pages.dev. Perubahan tersimpan untuk semua pengunjung.</p>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <label className="block space-y-1"><span className="text-[10px] font-bold text-slate-600">Nama brand</span><input value={landingDesignDraft.brandName} onChange={e => setLandingDesignDraft(current => ({ ...current, brandName: e.target.value }))} maxLength={48} disabled={!landingDesignLoaded} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-violet-400 disabled:opacity-50" placeholder="Leviankitchen" /></label>
+                  <label className="block space-y-1"><span className="text-[10px] font-bold text-slate-600">Judul utama</span><textarea value={landingDesignDraft.title} onChange={e => setLandingDesignDraft(current => ({ ...current, title: e.target.value }))} rows={2} maxLength={110} disabled={!landingDesignLoaded} className="w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-violet-400 disabled:opacity-50" placeholder="Judul promosi" /></label>
+                  <label className="block space-y-1"><span className="text-[10px] font-bold text-slate-600">Deskripsi</span><textarea value={landingDesignDraft.description} onChange={e => setLandingDesignDraft(current => ({ ...current, description: e.target.value }))} rows={3} maxLength={260} disabled={!landingDesignLoaded} className="w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs leading-5 text-slate-800 outline-none focus:border-violet-400 disabled:opacity-50" placeholder="Tulis deskripsi singkat resto atau produk" /></label>
+                  <label className="block space-y-1"><span className="text-[10px] font-bold text-slate-600">Teks tombol pesan</span><input value={landingDesignDraft.ctaLabel} onChange={e => setLandingDesignDraft(current => ({ ...current, ctaLabel: e.target.value }))} maxLength={36} disabled={!landingDesignLoaded} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-violet-400 disabled:opacity-50" placeholder="Contoh: Pesan sekarang" /></label>
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2"><span className="text-[10px] font-bold text-slate-600">Foto utama landing</span>{landingDesignDraft.heroImage && <button type="button" onClick={() => setLandingDesignDraft(current => ({ ...current, heroImage: "" }))} className="text-[10px] font-bold text-rose-600">Pakai foto default</button>}</div>
+                    <img src={landingDesignDraft.heroImage || "/images/terang-bulan-hero.jpg"} alt="Pratinjau foto landing page" className="h-36 w-full rounded-xl bg-white object-cover" />
+                    <label className={`mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[10px] font-bold text-slate-700 ${landingImageProcessing || !landingDesignLoaded ? "pointer-events-none opacity-50" : "hover:bg-slate-100"}`}>
+                      <input type="file" accept="image/*" onChange={handleLandingImageUpload} disabled={landingImageProcessing || !landingDesignLoaded} className="hidden" />
+                      <Upload size={14} className="text-violet-600" />{landingImageProcessing ? "Mengoptimalkan foto…" : "Pilih / ganti foto"}
+                    </label>
+                    <p className="mt-2 text-[9px] leading-4 text-slate-400">Foto akan diperkecil otomatis (maks. 1.400 px) sebelum disimpan ke Firebase.</p>
+                  </div>
+                  <button type="button" onClick={saveLandingDesign} disabled={!landingDesignLoaded || landingDesignSaving || landingImageProcessing} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-3 text-xs font-black text-white shadow-sm transition hover:bg-violet-700 disabled:cursor-wait disabled:opacity-50">{landingDesignSaving ? "Menyimpan…" : "Simpan & perbarui landing page"}<Check size={15}/></button>
+                  {!landingDesignLoaded && <p className="text-center text-[10px] text-slate-400">Memuat pengaturan desain…</p>}
                 </div>
               </section>
               

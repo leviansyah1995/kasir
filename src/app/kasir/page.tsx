@@ -125,14 +125,17 @@ export default function KasirPage() {
     const unsubSettings = onValue(ref(db, "settings"), (snap) => {
       if (snap.exists()) setSettings(snap.val());
     });
-    const unsubQrisSettings = onValue(ref(db, "publicPaymentSettings"), (snap) => {
-      const value = snap.val() || {};
-      setQrisImageUrl(typeof value.qrisImageUrl === "string" ? value.qrisImageUrl : "");
-      setPickupAddress(typeof value.pickupAddress === "string" ? value.pickupAddress : "");
-      setTakeawayMapUrl(typeof value.takeawayMapUrl === "string" ? value.takeawayMapUrl : "");
+    const unsubQrisSettings = onValue(ref(db, "publicPaymentSettings/qrisImageUrl"), snap => {
+      setQrisImageUrl(typeof snap.val() === "string" ? snap.val() : "");
+    });
+    const unsubPickupAddress = onValue(ref(db, "publicPaymentSettings/pickupAddress"), snap => {
+      setPickupAddress(typeof snap.val() === "string" ? snap.val() : "");
+    });
+    const unsubTakeawayMap = onValue(ref(db, "publicPaymentSettings/takeawayMapUrl"), snap => {
+      setTakeawayMapUrl(typeof snap.val() === "string" ? snap.val() : "");
     });
 
-    return () => { unsubAuth(); unsubProducts(); unsubCategories(); unsubOrders(); unsubSettings(); unsubQrisSettings(); };
+    return () => { unsubAuth(); unsubProducts(); unsubCategories(); unsubOrders(); unsubSettings(); unsubQrisSettings(); unsubPickupAddress(); unsubTakeawayMap(); };
   }, [router]);
 
   const handleLogin = async () => {
