@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, set, push, update, remove, runTransaction, query, orderByChild, equalTo } from "firebase/database";
-import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
+import { getRedirectResult, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 
 // ==============================================
 // TYPES
@@ -96,6 +96,7 @@ export default function ShopPage() {
   const [isCheckingNetwork, setIsCheckingNetwork] = useState(false);
   const [restaurantOpen, setRestaurantOpen] = useState<boolean | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState<"home"|"active"|"history"|"settings"|"cart"|"wishlist">("home");
 
   const [products, setProducts] = useState<Product[]>([]);
@@ -167,9 +168,14 @@ export default function ShopPage() {
     if (savedFav) setFavorites(JSON.parse(savedFav));
 
     let unsubUserProfile: (() => void) | undefined;
+    void getRedirectResult(auth).catch(error => {
+      console.error("Login Google redirect gagal:", error);
+      setAuthError(error?.message || "Login Google gagal. Coba buka halaman ini langsung di Chrome atau TWA.");
+    });
     const unsubAuth = onAuthStateChanged(auth, (fu) => {
       unsubUserProfile?.();
       if (fu) {
+        setAuthError("");
         // Set user immediately so Firebase data listeners restart with the Google session.
         const googlePhotoURL = normalizeGooglePhotoUrl(fu.photoURL || fu.providerData?.[0]?.photoURL || "");
         const googleName = fu.displayName || "Customer";
@@ -272,7 +278,12 @@ export default function ShopPage() {
 
   const handleLogin = async () => {
     if (user) return setActiveTab("settings");
-    try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch (e) { console.error(e); }
+    setAuthError("");
+    try { await signInWithRedirect(auth, new GoogleAuthProvider()); }
+    catch (error: unknown) {
+      console.error("Gagal memulai login Google:", error);
+      setAuthError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
+    }
   };
 
   const handleLogout = async () => {
@@ -677,6 +688,7 @@ export default function ShopPage() {
 
   return (
     <div className="fixed inset-0 bg-slate-200 flex justify-center items-center sm:py-6 z-0">
+      {authError && <div role="alert" className="fixed left-3 right-3 top-3 z-[300] mx-auto flex max-w-md items-start gap-3 rounded-2xl border border-rose-200 bg-white p-4 text-left text-xs font-semibold text-rose-700 shadow-2xl"><span className="flex-1">{authError}</span><button type="button" onClick={() => setAuthError("")} aria-label="Tutup pesan" className="rounded-lg p-1 text-rose-500 hover:bg-rose-50"><X size={16}/></button></div>}
       <div className="w-full h-full sm:max-w-[410px] sm:h-[860px] sm:max-h-full sm:rounded-[40px] sm:border-[8px] sm:border-slate-800 bg-[#fbfbfb] shadow-2xl flex overflow-hidden relative">
         
         {/* SIDEBAR KIRI */}

@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, push, set, remove, update } from "firebase/database";
-import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
+import { getRedirectResult, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 import { useRouter } from "next/navigation";
 
 // ==============================================
@@ -47,6 +47,7 @@ export default function KasirPage() {
   const [isClient, setIsClient] = useState(false);
   const [adminUser, setAdminUser] = useState<any>(null);
   const [authChecking, setAuthChecking] = useState(true);
+  const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState<TabType>("kasir");
 
   const [products, setProducts] = useState<Product[]>([]);
@@ -86,9 +87,14 @@ export default function KasirPage() {
   // ==============================================
   useEffect(() => {
     setIsClient(true);
+    void getRedirectResult(auth).catch(error => {
+      console.error("Login redirect Google gagal:", error);
+      setAuthError(error?.message || "Login Google tidak dapat diselesaikan. Coba buka lewat Chrome atau TWA.");
+    });
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       if (user) {
         if (user.email === ADMIN_EMAIL) {
+          setAuthError("");
           setAdminUser(user);
         } else {
           alert("Akses Ditolak! Email ini tidak memiliki akses ke Sistem Kasir.");
@@ -139,8 +145,12 @@ export default function KasirPage() {
   }, [router]);
 
   const handleLogin = async () => {
-    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-    catch (e) { console.error(e); }
+    setAuthError("");
+    try { await signInWithRedirect(auth, new GoogleAuthProvider()); }
+    catch (error: unknown) {
+      console.error("Gagal memulai login Google:", error);
+      setAuthError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
+    }
   };
   const handleLogout = async () => {
     await signOut(auth);
@@ -398,6 +408,7 @@ export default function KasirPage() {
           <div className="bg-blue-500 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6"><LayoutDashboard size={32} /></div>
           <h1 className="text-2xl font-black mb-2">POS Kasir</h1>
           <p className="text-slate-400 text-sm mb-8">Login menggunakan akun Administrator untuk mengelola produk dan pesanan.</p>
+          {authError && <p role="alert" className="mb-4 rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-xs text-red-200">{authError}</p>}
           <button onClick={handleLogin} className="w-full bg-white text-slate-900 font-bold py-3 rounded-xl hover:bg-slate-100 transition-colors">Login dengan Google</button>
         </div>
       </div>

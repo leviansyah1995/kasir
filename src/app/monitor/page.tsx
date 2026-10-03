@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BellRing, CheckCircle2, Clock3, LogIn, LogOut, Monitor, Volume2, VolumeX } from "lucide-react";
 import { onValue, ref } from "firebase/database";
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { GoogleAuthProvider, getRedirectResult, onAuthStateChanged, signInWithRedirect, signOut, type User } from "firebase/auth";
 import { auth, db } from "../../lib/firebase";
 
 type MonitorOrderItem = {
@@ -57,6 +57,10 @@ export default function MonitorPage() {
   const completedScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    void getRedirectResult(auth).catch(error => {
+      console.error("Login redirect Google gagal:", error);
+      setAuthError(error?.message || "Login Google tidak dapat diselesaikan. Coba buka lewat Chrome atau TWA.");
+    });
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setAuthLoading(false);
       if (user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() && user.emailVerified) {
@@ -168,9 +172,9 @@ export default function MonitorPage() {
   const handleAdminLogin = async () => {
     setAuthError("");
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
-    } catch (error: any) {
-      setAuthError(error?.message || "Gagal masuk dengan Google.");
+      await signInWithRedirect(auth, new GoogleAuthProvider());
+    } catch (error: unknown) {
+      setAuthError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
     }
   };
 
