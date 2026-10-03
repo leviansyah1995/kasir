@@ -123,9 +123,7 @@ export default {
     try { form = await request.formData(); } catch { return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN); }
     const file = form.get("proof");
     const orderId = String(form.get("orderId") || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
-    const dateKey = String(form.get("dateKey") || "").replace(/[^0-9]/g, "");
-    const uniqueCode = Number(form.get("uniqueCode") || 0);
-    if (!(file instanceof File) || !orderId || !/^\d{8}$/.test(dateKey) || !Number.isInteger(uniqueCode) || uniqueCode < 1 || uniqueCode > 499) return json({ error: "Foto, order, atau kode unik tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
+    if (!(file instanceof File) || !orderId) return json({ error: "Foto atau nomor pesanan tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
 
     if (!file.type.startsWith("image/") || file.size < 1 || file.size > 5 * 1024 * 1024) return json({ error: "Foto harus berupa gambar maksimal 5 MB." }, 413, origin, env.ALLOWED_ORIGIN);
     const bytes = new Uint8Array(await file.arrayBuffer());

@@ -44,8 +44,6 @@ interface Order {
   paymentMethod?: string;
   paymentStatus?: string;
   paymentProofPath?: string;
-  uniqueCode?: number;
-  subtotal?: number;
   sourceLabel?: string;
   channel?: string;
   source: string; // "kasir" | "shop"
@@ -561,8 +559,6 @@ export default function OrderPage() {
           orderType: val[k].orderType || "takeaway",
           customer: val[k].customer || {},
           paymentProofPath: val[k].paymentProofPath || "",
-          uniqueCode: Number(val[k].uniqueCode || 0),
-          subtotal: Number(val[k].subtotal ?? val[k].total ?? 0),
           sourceLabel: val[k].sourceLabel || "",
           channel: val[k].channel || ""
         }));
@@ -867,7 +863,7 @@ export default function OrderPage() {
 
     const headers = [
       "No", "No Transaksi", "Tanggal", "Sumber", "Pelanggan", "No Telepon",
-      "Alamat", "Rincian Pesanan", "Metode Bayar", "Total Diterima (Rp)", "Kode Unik (Rp)", "Omzet Produk (Rp)", "Status"
+      "Alamat", "Rincian Pesanan", "Metode Bayar", "Total Diterima (Rp)", "Status"
     ];
     const orderRows = finishedList.map((order, index) => {
       const details = (order.items || []).map(item => {
@@ -880,28 +876,27 @@ export default function OrderPage() {
       return [
         index + 1, order.orderNumber, order.date, order.sourceLabel || (order.channel || order.source || "").toUpperCase(),
         order.customer?.name || "-", order.customer?.phone || "-", order.customer?.address || "-",
-        details, order.paymentMethod || "-", Number(order.total || 0), Number(order.uniqueCode || 0),
-        Number(order.subtotal ?? ((order.total || 0) - (order.uniqueCode || 0))), "Pesanan sudah diambil"
+        details, order.paymentMethod || "-", Number(order.total || 0), "Pesanan sudah diambil"
       ];
     });
     const sheetData: (string | number)[][] = [
       headers,
       ...orderRows,
-      Array(13).fill(""),
-      ["TOTAL DITERIMA", "", "", "", "", "", "", "", "", Number(totalEarnings), Number(uniqueCodeEarnings), Number(totalEarnings - uniqueCodeEarnings), ""]
+      Array(11).fill(""),
+      ["TOTAL DITERIMA", "", "", "", "", "", "", "", "", Number(totalEarnings), ""]
     ];
 
     const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
     worksheet["!cols"] = [
       { wch: 6 }, { wch: 20 }, { wch: 22 }, { wch: 12 }, { wch: 24 }, { wch: 18 },
-      { wch: 32 }, { wch: 48 }, { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 20 }, { wch: 24 }
+      { wch: 32 }, { wch: 48 }, { wch: 16 }, { wch: 18 }, { wch: 24 }
     ];
-    worksheet["!autofilter"] = { ref: `A1:M${finishedList.length + 1}` };
+    worksheet["!autofilter"] = { ref: `A1:K${finishedList.length + 1}` };
     worksheet["!rows"] = [{ hpt: 24 }, ...finishedList.map(() => ({ hpt: 48 })), {}, { hpt: 24 }];
 
     // Format angka total sebagai rupiah di Excel.
     for (let row = 1; row <= finishedList.length + 2; row++) {
-      for (const column of [9, 10, 11]) {
+      for (const column of [9]) {
         const address = XLSX.utils.encode_cell({ r: row, c: column });
         if (worksheet[address]) worksheet[address].z = '"Rp" #,##0';
       }
@@ -942,7 +937,7 @@ export default function OrderPage() {
       table{width:100%;border-collapse:collapse}th,td{border:1px solid #cbd5e1;padding:8px;text-align:left;vertical-align:top}th{background:#f1f5f9;font-weight:700}.money{text-align:right;white-space:nowrap}.item{margin-bottom:5px}small{display:block;color:#475569;margin-left:12px;line-height:1.4}
       @page{size:A4 landscape;margin:12mm}@media print{body{margin:0}.summary{break-inside:avoid}tr{break-inside:avoid}}
     </style></head><body><h1>Laporan Pesanan Selesai</h1><div class="date">Dicetak: ${esc(new Date().toLocaleString("id-ID"))}</div>
-    <div class="summary">Jumlah transaksi: <b>${completedOrders.length}</b><br>Total uang masuk: <strong>${esc(formatRp(totalEarnings))}</strong><br>Kasir: ${esc(formatRp(kasirEarnings))} &nbsp; | &nbsp; Marketplace: ${esc(formatRp(marketplaceEarnings))} &nbsp; | &nbsp; Shop: ${esc(formatRp(shopEarnings))}<br>Kode unik Shop: ${esc(formatRp(uniqueCodeEarnings))} &nbsp; | &nbsp; Omzet produk Shop: ${esc(formatRp(shopProductEarnings))}</div>
+    <div class="summary">Jumlah transaksi: <b>${completedOrders.length}</b><br>Total uang masuk: <strong>${esc(formatRp(totalEarnings))}</strong><br>Kasir: ${esc(formatRp(kasirEarnings))} &nbsp; | &nbsp; Marketplace: ${esc(formatRp(marketplaceEarnings))} &nbsp; | &nbsp; Shop: ${esc(formatRp(shopEarnings))}</div>
     <table><thead><tr><th>No</th><th>No Transaksi</th><th>Tanggal</th><th>Sumber</th><th>Pelanggan</th><th>Rincian Pesanan</th><th>Total</th></tr></thead><tbody>${rows || `<tr><td colspan="7">Belum ada transaksi selesai.</td></tr>`}</tbody></table>
     <script>window.onload=()=>{window.focus();window.print()}</script></body></html>`);
     printWindow.document.close();
@@ -964,8 +959,6 @@ export default function OrderPage() {
   const onlineChannels = ["shopeefood", "grabfood", "gofood"];
   const kasirEarnings = completedOrders.filter(o => o.source === "kasir" && !onlineChannels.includes(o.channel || "")).reduce((sum, o) => sum + (o.total || 0), 0);
   const shopEarnings = completedOrders.filter(o => o.source === "shop").reduce((sum, o) => sum + (o.total || 0), 0);
-  const uniqueCodeEarnings = completedOrders.filter(o => o.source === "shop").reduce((sum, o) => sum + (o.uniqueCode || 0), 0);
-  const shopProductEarnings = Math.max(0, shopEarnings - uniqueCodeEarnings);
   const marketplaceEarnings = completedOrders.filter(o => onlineChannels.includes(o.channel || o.source)).reduce((sum, o) => sum + (o.total || 0), 0);
 
   // Status helper
@@ -1202,12 +1195,12 @@ export default function OrderPage() {
                               ))}
                             </div>
                             <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3">
-                              <div><p className="text-[10px] text-slate-500">Total pembayaran</p><p className="font-black text-slate-900">{formatRp(order.total)}</p>{(order.uniqueCode || 0) > 0 && <p className="text-[10px] text-slate-500">Belanja {formatRp(order.subtotal || order.total - (order.uniqueCode || 0))} + kode unik {formatRp(order.uniqueCode || 0)}</p>}</div>
+                              <div><p className="text-[10px] text-slate-500">Total pembayaran</p><p className="font-black text-slate-900">{formatRp(order.total)}</p></div>
                               <div className="text-right"><p className="mb-1 text-[10px] font-bold uppercase text-slate-400">Status</p>{renderStatusTag(order.status)}</div>
                             </div>
                             {statusKind(order.status) === "pendingPayment" ? (
                               <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                                <p className="text-xs leading-relaxed text-amber-900">Cocokkan nominal total dan kode unik di aplikasi merchant.</p>
+                                <p className="text-xs leading-relaxed text-amber-900">Cocokkan nominal total pesanan di aplikasi merchant.</p>
                                 {order.paymentProofPath && (proofImageUrls[order.id] ? <button type="button" onClick={() => setProofPreviewUrl(proofImageUrls[order.id])} className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white p-2 text-left"><img src={proofImageUrls[order.id]} alt="Bukti pembayaran privat" className="h-14 w-14 rounded-md object-cover"/><span className="text-[11px] font-bold text-amber-900">Lihat bukti<br/>{formatRp(order.total)}</span></button> : <span className="text-[10px] text-amber-800">Memuat bukti pembayaran…</span>)}
                                 <button onClick={() => confirmQrisPayment(order)} className="w-full rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-black text-white">Pembayaran terverifikasi — kirim ke dapur</button>
                               </div>
@@ -1303,7 +1296,7 @@ export default function OrderPage() {
                   <span>Dari {completedOrders.length} Pesanan Selesai</span>
                   <span>Kasir: {formatRp(kasirEarnings)} | Marketplace: {formatRp(marketplaceEarnings)} | Shop: {formatRp(shopEarnings)}</span>
                 </div>
-                <p className="mt-2 text-[10px] text-slate-400">Shop: omzet produk {formatRp(shopProductEarnings)} + akumulasi kode unik {formatRp(uniqueCodeEarnings)} = total diterima {formatRp(shopEarnings)}.</p>
+                
               </div>
 
               {/* ACTION BUTTONS (EXCEL & PRINT) */}
@@ -1588,7 +1581,6 @@ export default function OrderPage() {
                 </div>
               ))}
             </div>
-            {(orderToPrint.uniqueCode || 0) > 0 && <div className="border-t border-dashed border-black py-2 text-[10px]">Kode unik QRIS: {formatRp(orderToPrint.uniqueCode || 0)}</div>}
             <div className="flex justify-between border-t border-black py-2 text-xs font-black"><span>TOTAL</span><span>{formatRp(orderToPrint.total)}</span></div>
             <p className="pt-2 text-center text-[10px]">Terima kasih</p>
           </div>

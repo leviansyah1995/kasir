@@ -7,7 +7,7 @@ import {
   Heart, Share2, X, ArrowLeft, LogOut, QrCode, WifiOff, RefreshCw, Send, Copy, Sparkles, MessageCircle
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
-import { ref, onValue, set, push, update, remove, runTransaction, query, orderByChild, equalTo } from "firebase/database";
+import { ref, onValue, set, push, update, remove, query, orderByChild, equalTo } from "firebase/database";
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 
 // ==============================================
@@ -51,13 +51,6 @@ const formatNumber = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g
 
 // Ubah urutan counter harian menjadi kode acak-semu yang konsisten di semua perangkat.
 // Karena 499 bilangan prima, setiap multiplier 1–498 menghasilkan permutasi unik 1–499.
-const getDailyQrisCode = (dateKey: string, sequence: number) => {
-  let seed = 2166136261;
-  for (let i = 0; i < dateKey.length; i++) seed = Math.imul(seed ^ dateKey.charCodeAt(i), 16777619) >>> 0;
-  const multiplier = (seed % 498) + 1;
-  const offset = (Math.imul(seed ^ 0x9e3779b9, 0x85ebca6b) >>> 0) % 499;
-  return (Math.imul(multiplier, Math.max(0, sequence - 1)) + offset) % 499 + 1;
-};
 
 const prepareProofImage = async (file: File): Promise<File> => {
   // Draw through canvas to strip EXIF/GPS metadata before the photo is uploaded privately.
@@ -126,9 +119,7 @@ export default function ShopPage() {
   const [qrisImageUrl, setQrisImageUrl] = useState("");
   const [takeawayMapUrl, setTakeawayMapUrl] = useState("");
   const [pickupAddress, setPickupAddress] = useState("");
-  const [qrisUniqueCode, setQrisUniqueCode] = useState(0);
   const [qrisOrderId, setQrisOrderId] = useState("");
-  const [reservationDateKey, setReservationDateKey] = useState("");
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
   const [paymentProofPreview, setPaymentProofPreview] = useState("");
   const [isQrisOpen, setIsQrisOpen] = useState(false);
@@ -393,23 +384,12 @@ export default function ShopPage() {
     try {
       await update(ref(db, `users/${user.uid}`), { name: user.name, email: user.email, photoURL: user.photoURL, phone, address, favorites });
       const orderRef = push(ref(db, "orders"));
-      const now = new Date();
-      const dateKey = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
-      // Atomic daily counter: only one small number per day is stored, not one reservation per order.
-      const counterRef = ref(db, `qrisPaymentCodeCounters/${dateKey}`);
-      const counterResult = await runTransaction(counterRef, current => {
-        const count = typeof current === "number" ? current : 0;
-        return count < 499 ? count + 1 : undefined;
-      }, { applyLocally: false });
-      if (!counterResult.committed) throw new Error("Kode unik hari ini sudah mencapai batas. Coba lagi besok atau hubungi admin.");
-      const allocatedSequence = Number(counterResult.snapshot.val());
-      const uniqueCode = getDailyQrisCode(dateKey, allocatedSequence);
       setUser({ ...user, phone, address });
-      setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(uniqueCode);
+      setQrisOrderId(orderRef.key || "");
       setPaymentProofFile(null); setPaymentProofPreview(""); setIsQrisOpen(true);
     } catch (error: any) {
       console.error("Gagal menyiapkan checkout:", error);
-      alert(error?.message?.includes("permission") ? "Gagal menyiapkan kode unik. Admin perlu menerbitkan Firebase Realtime Database Rules terbaru." : error?.message || "Data pelanggan/kode unik gagal disimpan.");
+      alert(error?.message?.includes("permission") ? "Gagal menyiapkan pesanan. Periksa aturan Firebase Realtime Database." : error?.message || "Data pelanggan gagal disimpan.");
     }
   };
 
@@ -418,7 +398,7 @@ export default function ShopPage() {
   };
 
   const submitQrisOrderForVerification = async () => {
-    if (!user || !qrisImageUrl || cart.length === 0 || !paymentProofFile || !qrisOrderId || !qrisUniqueCode || isSubmittingOrder) {
+    if (!user || !qrisImageUrl || cart.length === 0 || !paymentProofFile || !qrisOrderId || isSubmittingOrder) {
       if (!paymentProofFile) alert("Pilih foto bukti pembayaran terlebih dahulu.");
       return;
     }
@@ -429,22 +409,21 @@ export default function ShopPage() {
       if (!token) throw new Error("Sesi login berakhir. Silakan login ulang.");
       const safePhoto = await prepareProofImage(paymentProofFile);
       if (safePhoto.size > 5 * 1024 * 1024) throw new Error("Foto setelah diproses masih lebih dari 5 MB. Pilih foto yang lebih kecil.");
-      const form = new FormData(); form.set("proof", safePhoto); form.set("orderId", qrisOrderId); form.set("dateKey", reservationDateKey); form.set("uniqueCode", String(qrisUniqueCode));
+      const form = new FormData(); form.set("proof", safePhoto); form.set("orderId", qrisOrderId); 
       const uploadEndpoint = process.env.NEXT_PUBLIC_PROOF_UPLOAD_URL;
       if (!uploadEndpoint) throw new Error("URL Worker upload belum diatur. Admin perlu menambahkan NEXT_PUBLIC_PROOF_UPLOAD_URL di Cloudflare Pages.");
       const uploadResponse = await fetch(uploadEndpoint, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
       const uploadResult = await uploadResponse.json();
       if (!uploadResponse.ok || !uploadResult.path) throw new Error(uploadResult.error || "Unggah foto bukti privat gagal.");
-      const payableTotal = cartTotal + qrisUniqueCode;
       await set(ref(db, `orders/${qrisOrderId}`), {
         orderNumber: "ORD-" + Math.random().toString(36).slice(2, 8).toUpperCase(), date: new Date().toLocaleString("id-ID"), createdAt: Date.now(),
-        items: cart, subtotal: cartTotal, uniqueCode: qrisUniqueCode, total: payableTotal,
+        items: cart, total: cartTotal,
         paymentProofPath: uploadResult.path,
         source: "shop", status: "PENDING_PAYMENT", paymentStatus: "CUSTOMER_CLAIMS_PAID", paymentMethod: "QRIS", orderType,
         customer: { uid: user.uid, name: user.name, phone: editProfile.phone.trim() || user.phone || "", address: editProfile.address.trim() || user.address || "" }
       });
       setCart([]); setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview(""); setActiveTab("active");
-      alert("Bukti pembayaran terkirim. Admin akan mencocokkan total belanja dan kode unik di aplikasi merchant.");
+      alert("Bukti pembayaran terkirim. Admin akan mencocokkan pembayaran dengan total pesanan di aplikasi merchant.");
     } catch (error: any) {
       console.error("Gagal mengirim bukti/order QRIS:", error);
       alert(error?.message || "Pesanan atau bukti gagal dikirim. Periksa koneksi lalu coba lagi.");
@@ -1011,8 +990,8 @@ export default function ShopPage() {
               </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Total yang harus dibayar</p>
-                <p className="mt-1 text-2xl font-black text-orange-600">{formatRp(cartTotal + qrisUniqueCode)}</p>
-                <p className="mt-1 text-xs text-slate-600">Belanja {formatRp(cartTotal)} + kode unik {formatRp(qrisUniqueCode)}</p>
+                <p className="mt-1 text-2xl font-black text-orange-600">{formatRp(cartTotal)}</p>
+                <p className="mt-1 text-xs text-slate-600">Bayar sesuai total belanja</p>
                 <img src={qrisImageUrl} alt="QRIS toko" referrerPolicy="no-referrer" className="mx-auto mt-4 aspect-square w-56 rounded-xl bg-white object-contain p-2" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
               </div>
               <div className="mt-4 space-y-2 rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
