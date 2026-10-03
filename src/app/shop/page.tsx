@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, set, push, update, remove, runTransaction, query, orderByChild, equalTo } from "firebase/database";
-import { getRedirectResult, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 
 // ==============================================
 // TYPES
@@ -168,10 +168,6 @@ export default function ShopPage() {
     if (savedFav) setFavorites(JSON.parse(savedFav));
 
     let unsubUserProfile: (() => void) | undefined;
-    void getRedirectResult(auth).catch(error => {
-      console.error("Login Google redirect gagal:", error);
-      setAuthError(error?.message || "Login Google gagal. Coba buka halaman ini langsung di Chrome atau TWA.");
-    });
     const unsubAuth = onAuthStateChanged(auth, (fu) => {
       unsubUserProfile?.();
       if (fu) {
@@ -279,10 +275,10 @@ export default function ShopPage() {
   const handleLogin = async () => {
     if (user) return setActiveTab("settings");
     setAuthError("");
-    try { await signInWithRedirect(auth, new GoogleAuthProvider()); }
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
     catch (error: unknown) {
-      console.error("Gagal memulai login Google:", error);
-      setAuthError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
+      console.error("Login Google popup gagal:", error);
+      setAuthError(error instanceof Error ? error.message : "Login Google gagal. Izinkan popup di Chrome/TWA lalu coba lagi.");
     }
   };
 

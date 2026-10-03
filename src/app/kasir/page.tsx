@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { db, auth } from "../../lib/firebase";
 import { ref, onValue, push, set, remove, update } from "firebase/database";
-import { getRedirectResult, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from "firebase/auth";
 import { useRouter } from "next/navigation";
 
 // ==============================================
@@ -87,10 +87,6 @@ export default function KasirPage() {
   // ==============================================
   useEffect(() => {
     setIsClient(true);
-    void getRedirectResult(auth).catch(error => {
-      console.error("Login redirect Google gagal:", error);
-      setAuthError(error?.message || "Login Google tidak dapat diselesaikan. Coba buka lewat Chrome atau TWA.");
-    });
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       if (user) {
         if (user.email === ADMIN_EMAIL) {
@@ -146,10 +142,10 @@ export default function KasirPage() {
 
   const handleLogin = async () => {
     setAuthError("");
-    try { await signInWithRedirect(auth, new GoogleAuthProvider()); }
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
     catch (error: unknown) {
-      console.error("Gagal memulai login Google:", error);
-      setAuthError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
+      console.error("Login Google popup gagal:", error);
+      setAuthError(error instanceof Error ? error.message : "Login Google gagal. Izinkan popup di Chrome/TWA lalu coba lagi.");
     }
   };
   const handleLogout = async () => {

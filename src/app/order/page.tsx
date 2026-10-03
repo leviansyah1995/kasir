@@ -11,7 +11,7 @@ import {
 import { auth, db } from "../../lib/firebase";
 import * as XLSX from "xlsx";
 import { ref, onValue, remove, set, update } from "firebase/database";
-import { onAuthStateChanged, signOut, signInWithRedirect, getRedirectResult, GoogleAuthProvider } from "firebase/auth";
+import { onAuthStateChanged, signOut, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 
 const ALLOWED_ADMIN_EMAIL = "dianarifin.shopeedriver@gmail.com";
 const DEFAULT_ORDER_AUDIO_URL = "https://cdn.jsdelivr.net/gh/leviansyah1995/asset@main/orderan.mp3";
@@ -417,10 +417,6 @@ export default function OrderPage() {
 
   // 1. Auth Observer (Tanpa Redirect Otomatis ke Shop saat Logout)
   useEffect(() => {
-    void getRedirectResult(auth).catch(error => {
-      console.error("Login redirect Google gagal:", error);
-      setLoginError(error?.message || "Login Google tidak dapat diselesaikan. Coba buka melalui Chrome atau TWA.");
-    });
     const unsubAuth = onAuthStateChanged(auth, (fu) => {
       setAuthLoading(false);
       if (fu) {
@@ -720,9 +716,10 @@ export default function OrderPage() {
   const handleLoginGoogle = async () => {
     setLoginError(null);
     try {
-      await signInWithRedirect(auth, new GoogleAuthProvider());
+      await signInWithPopup(auth, new GoogleAuthProvider());
     } catch (error: unknown) {
-      setLoginError(error instanceof Error ? error.message : "Gagal memulai login Google. Coba buka lewat Chrome/TWA.");
+      console.error("Login Google popup gagal:", error);
+      setLoginError(error instanceof Error ? error.message : "Login Google gagal. Izinkan popup di Chrome/TWA lalu coba lagi.");
     }
   };
 
