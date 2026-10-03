@@ -16,7 +16,7 @@ import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from
 interface Product {
   id: string; name: string; price: number; imageUrl: string;
   category: string; stock: number; active: boolean; description?: string;
-  variants?: string[]; maxVariant?: number; cookingOptions?: string[];
+  variants?: string[]; variantPrices?: Record<string, number>; maxVariant?: number; cookingOptions?: string[];
 }
 interface CartItem extends Product { 
   cartItemId: string; qty: number; selectedVariants: string[]; cookingMethod: string; note: string; 
@@ -341,6 +341,8 @@ export default function ShopPage() {
     if (product.stock === 0) return alert("Stok habis!");
     const variantKey = selectedVariants.slice().sort().join("+");
     const cartItemId = `${product.id}-${variantKey}-${cookingMethod}-${note}`.replace(/\s+/g, "-");
+    const flavorExtra = selectedVariants.reduce((sum, flavor) => sum + Number(product.variantPrices?.[flavor] || 0), 0);
+    const unitPrice = Number(product.price) + flavorExtra;
     const existIndex = cart.findIndex(c => c.cartItemId === cartItemId);
 
     if (existIndex >= 0) {
@@ -349,7 +351,7 @@ export default function ShopPage() {
       newCart[existIndex].qty += qty;
       setCart(newCart);
     } else {
-      setCart([...cart, { ...product, cartItemId, qty, selectedVariants, cookingMethod, note }]);
+      setCart([...cart, { ...product, price: unitPrice, cartItemId, qty, selectedVariants, cookingMethod, note }]);
     }
   };
 
@@ -383,26 +385,16 @@ export default function ShopPage() {
       const orderRef = push(ref(db, "orders"));
       const now = new Date();
       const dateKey = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
-      let reservedCode = 0;
-      for (let attempt = 0; attempt < 100 && !reservedCode; attempt++) {
-        const candidate = Math.floor(Math.random() * 499) + 1;
-        const reservationRef = ref(db, `qrisPaymentReservations/${dateKey}/${candidate}`);
-        try {
-          const result = await runTransaction(reservationRef, current => {
-            if (!current || (current.expiresAt || 0) < Date.now()) {
-              return { uid: user.uid, orderId: orderRef.key, createdAt: Date.now(), expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
-            }
-            return;
-          }, { applyLocally: false });
-          if (result.committed) reservedCode = candidate;
-        } catch (reservationError: any) {
-          // A rule intentionally hides other customers' reservation details; skip that code.
-          if (!String(reservationError?.code || reservationError?.message || "").includes("PERMISSION_DENIED")) throw reservationError;
-        }
-      }
-      if (!reservedCode) throw new Error("Kode unik hari ini sedang penuh. Coba lagi beberapa menit lagi.");
+      // Atomic daily counter: only one small number per day is stored, not one reservation per order.
+      const counterRef = ref(db, `qrisPaymentCodeCounters/${dateKey}`);
+      const counterResult = await runTransaction(counterRef, current => {
+        const count = typeof current === "number" ? current : 0;
+        return count < 499 ? count + 1 : undefined;
+      }, { applyLocally: false });
+      if (!counterResult.committed) throw new Error("Kode unik hari ini sudah mencapai batas. Coba lagi besok atau hubungi admin.");
+      const uniqueCode = Number(counterResult.snapshot.val());
       setUser({ ...user, phone, address });
-      setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(reservedCode);
+      setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(uniqueCode);
       setPaymentProofFile(null); setPaymentProofPreview(""); setIsQrisOpen(true);
     } catch (error: any) {
       console.error("Gagal menyiapkan checkout:", error);
@@ -411,9 +403,6 @@ export default function ShopPage() {
   };
 
   const closeQrisModal = async () => {
-    if (user?.uid && reservationDateKey && qrisUniqueCode && qrisOrderId) {
-      try { await remove(ref(db, `qrisPaymentReservations/${reservationDateKey}/${qrisUniqueCode}`)); } catch (error) { console.warn("Reservasi kode unik akan kedaluwarsa otomatis:", error); }
-    }
     setIsQrisOpen(false); setPaymentProofFile(null); setPaymentProofPreview("");
   };
 
@@ -587,7 +576,8 @@ export default function ShopPage() {
     const [cookingMethod, setCookingMethod] = useState(cookingList[0] || "");
     const [note, setNote] = useState("");
     const [localQty, setLocalQty] = useState(1);
-    const totalPrice = p.price * localQty;
+    const variantExtra = selectedVariants.reduce((sum, flavor) => sum + Number(p.variantPrices?.[flavor] || 0), 0);
+    const totalPrice = (Number(p.price) + variantExtra) * localQty;
 
     const toggleVariant = (v: string) => {
       if (selectedVariants.includes(v)) setSelectedVariants(selectedVariants.filter(x => x !== v));
@@ -613,7 +603,7 @@ export default function ShopPage() {
         <div className="flex-1 overflow-y-auto bg-slate-50 pb-6">
           <div className="bg-white p-5 flex justify-between items-start gap-4 mb-2 shadow-sm">
             <h1 className="font-extrabold text-lg text-slate-800 leading-tight">{p.name}</h1>
-            <span className="font-bold text-lg text-slate-800 shrink-0">{formatNumber(p.price)}</span>
+            <span className="font-bold text-lg text-slate-800 shrink-0">{formatNumber(Number(p.price) + variantExtra)}</span>
           </div>
           {variantList.length > 0 && (
             <div className="bg-white p-5 mb-2 shadow-sm">
@@ -627,7 +617,7 @@ export default function ShopPage() {
                     <label key={v} className={`flex justify-between items-center cursor-pointer py-3 border-b border-dashed border-slate-100 last:border-0 ${isDisabled ? "opacity-40 cursor-not-allowed" : ""}`}>
                       <span className={`text-sm font-semibold ${isSelected ? "text-orange-700" : "text-slate-700"}`}>{v}</span>
                       <div className="flex items-center gap-3">
-                        <span className="text-xs text-slate-400">Gratis</span>
+                        <span className={`text-xs ${Number(p.variantPrices?.[v] || 0) > 0 ? "font-semibold text-orange-600" : "text-slate-400"}`}>{Number(p.variantPrices?.[v] || 0) > 0 ? `+ ${formatRp(Number(p.variantPrices?.[v]))}` : "Gratis"}</span>
                         <div className={`w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${isSelected ? "border-orange-500 bg-orange-500" : "border-slate-300 bg-white"}`}>
                           {isSelected && <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
                         </div>
@@ -801,7 +791,7 @@ export default function ShopPage() {
                           <h3 className="font-bold text-sm truncate">{item.name}</h3>
                           {item.selectedVariants?.length > 0 && (
                             <p className="text-[10px] text-orange-600 font-semibold truncate">
-                              {item.selectedVariants.join(" + ")}
+                              {item.selectedVariants.map((flavor: string) => `${flavor}${Number(item.variantPrices?.[flavor] || 0) > 0 ? ` (+${formatRp(Number(item.variantPrices?.[flavor]))})` : ""}`).join(" + ")}
                             </p>
                           )}
                           {item.cookingMethod && (
@@ -872,7 +862,7 @@ export default function ShopPage() {
                       {order.items?.map((item: any, i: number) => (
                         <div key={i} className="mb-2">
                           <div className="text-xs font-semibold text-slate-700">{item.qty}x {item.name}</div>
-                          {item.selectedVariants?.length > 0 && <div className="text-[10px] text-orange-600 ml-4">- {item.selectedVariants.join(" + ")}</div>}
+                          {item.selectedVariants?.length > 0 && <div className="text-[10px] text-orange-600 ml-4">- {item.selectedVariants.map((flavor: string) => `${flavor}${Number(item.variantPrices?.[flavor] || 0) > 0 ? ` (+${formatRp(Number(item.variantPrices?.[flavor]))})` : ""}`).join(" + ")}</div>}
                           {item.cookingMethod && <div className="text-[10px] text-slate-500 ml-4">- {item.cookingMethod}</div>}
                         </div>
                       ))}

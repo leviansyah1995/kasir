@@ -3,7 +3,6 @@ interface Env {
   GITHUB_PROOF_REPO: string;
   GITHUB_PROOF_BRANCH?: string;
   FIREBASE_API_KEY: string;
-  FIREBASE_DATABASE_URL: string;
   ALLOWED_ORIGIN: string;
 }
 
@@ -74,7 +73,7 @@ export default {
     });
     if (request.method !== "GET" && request.method !== "POST") return json({ error: "Metode tidak diizinkan." }, 405, origin, env.ALLOWED_ORIGIN);
     if (!origin || !originAllowed(origin, env.ALLOWED_ORIGIN)) return json({ error: "Origin tidak diizinkan." }, 403);
-    if (!env.GITHUB_TOKEN || !env.GITHUB_PROOF_REPO || !env.FIREBASE_API_KEY || !env.FIREBASE_DATABASE_URL) return json({ error: "Pengaturan server bukti privat belum lengkap." }, 503, origin, env.ALLOWED_ORIGIN);
+    if (!env.GITHUB_TOKEN || !env.GITHUB_PROOF_REPO || !env.FIREBASE_API_KEY) return json({ error: "Pengaturan server bukti privat belum lengkap." }, 503, origin, env.ALLOWED_ORIGIN);
 
     const authorization = request.headers.get("authorization") || "";
     const idToken = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
@@ -127,12 +126,6 @@ export default {
     const dateKey = String(form.get("dateKey") || "").replace(/[^0-9]/g, "");
     const uniqueCode = Number(form.get("uniqueCode") || 0);
     if (!(file instanceof File) || !orderId || !/^\d{8}$/.test(dateKey) || !Number.isInteger(uniqueCode) || uniqueCode < 1 || uniqueCode > 499) return json({ error: "Foto, order, atau kode unik tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
-
-    const dbRoot = env.FIREBASE_DATABASE_URL.replace(/\/$/, "");
-    const reservationResponse = await fetch(`${dbRoot}/qrisPaymentReservations/${dateKey}/${uniqueCode}.json?auth=${encodeURIComponent(idToken)}`);
-    if (!reservationResponse.ok) return json({ error: "Tidak bisa memverifikasi reservasi kode unik." }, 403, origin, env.ALLOWED_ORIGIN);
-    const reservation = await reservationResponse.json() as { uid?: string; orderId?: string; expiresAt?: number } | null;
-    if (!reservation || reservation.uid !== firebaseUser.localId || reservation.orderId !== orderId || Number(reservation.expiresAt || 0) < Date.now()) return json({ error: "Kode unik tidak cocok dengan akun/order atau reservasinya kedaluwarsa." }, 403, origin, env.ALLOWED_ORIGIN);
 
     if (!file.type.startsWith("image/") || file.size < 1 || file.size > 5 * 1024 * 1024) return json({ error: "Foto harus berupa gambar maksimal 5 MB." }, 413, origin, env.ALLOWED_ORIGIN);
     const bytes = new Uint8Array(await file.arrayBuffer());

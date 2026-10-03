@@ -22,6 +22,7 @@ interface CartItem {
   price: number;
   qty: number;
   selectedVariants?: string[];
+  variantPrices?: Record<string, number>;
   cookingMethod?: string;
   note?: string;
 }
@@ -222,11 +223,33 @@ export default function OrderPage() {
   // Filters
   const [searchHistory, setSearchHistory] = useState("");
   const [filterSource, setFilterSource] = useState<"ALL" | "kasir" | "shop" | "online">("ALL");
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
+  const [orderToPrint, setOrderToPrint] = useState<Order | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
+
+  useEffect(() => {
+    if (!orderToPrint) return;
+    let finished = false;
+    const finishPrint = () => {
+      if (finished) return;
+      finished = true;
+      setOrderToPrint(null);
+      setToastMessage("Nota telah dicetak.");
+      window.setTimeout(() => setToastMessage(null), 3000);
+    };
+    window.addEventListener("afterprint", finishPrint);
+    const printTimer = window.setTimeout(() => window.print(), 150);
+    const fallbackTimer = window.setTimeout(finishPrint, 15000);
+    return () => {
+      window.removeEventListener("afterprint", finishPrint);
+      window.clearTimeout(printTimer);
+      window.clearTimeout(fallbackTimer);
+    };
+  }, [orderToPrint]);
 
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
@@ -926,30 +949,7 @@ export default function OrderPage() {
   };
 
   const handlePrintOrder = (order: Order) => {
-    const printWindow = window.open("", "_blank", "width=420,height=720");
-    if (!printWindow) {
-      alert("Izinkan pop-up di browser untuk mencetak nota.");
-      return;
-    }
-    const esc = (value: unknown) => String(value ?? "").replace(/[&<>\"']/g, (char) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
-    }[char] || char));
-    const rows = (order.items || []).map((item) => `
-      <div class="item">
-        <div><strong>${esc(item.qty)}x ${esc(item.name)}</strong><span>${formatRp(item.price * item.qty)}</span></div>
-        ${item.selectedVariants?.length ? `<small>Varian: ${esc(item.selectedVariants.join(" + "))}</small>` : ""}
-        ${item.cookingMethod ? `<small>Pilihan: ${esc(item.cookingMethod)}</small>` : ""}
-        ${item.note?.trim() ? `<small>Catatan: ${esc(item.note)}</small>` : ""}
-      </div>`).join("");
-    printWindow.document.open();
-    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Nota ${esc(order.orderNumber)}</title><style>
-      body{font:14px Arial,sans-serif;color:#111;max-width:360px;margin:20px auto;padding:0 12px}
-      h1{font-size:18px;text-align:center;margin:0 0 4px}.meta{font-size:12px;line-height:1.6;border-bottom:1px dashed #888;padding:8px 0}
-      .item{padding:9px 0;border-bottom:1px dashed #bbb}.item div{display:flex;justify-content:space-between;gap:8px}.item small{display:block;padding-left:18px;margin-top:3px;color:#444}
-      .total{display:flex;justify-content:space-between;font-weight:bold;font-size:16px;padding:12px 0;border-bottom:1px dashed #888}
-      .foot{text-align:center;font-size:11px;margin-top:14px}@media print{body{margin:0 auto}}
-    </style></head><body><h1>Nota Pesanan</h1><div class="meta">No: ${esc(order.orderNumber)}<br>Tanggal: ${esc(order.date)}<br>Sumber: ${esc(order.sourceLabel || order.channel || order.source)}<br>Pelanggan: ${esc(order.customer?.name || "Pelanggan")}</div>${rows}${order.uniqueCode ? `<div class="item">Belanja: ${formatRp(order.subtotal || order.total - order.uniqueCode)}<br>Kode unik: ${formatRp(order.uniqueCode)}</div>` : ""}<div class="total"><span>Total</span><span>${formatRp(order.total)}</span></div><div class="foot">Terima kasih</div><script>window.onload=()=>{window.focus();window.print()}</script></body></html>`);
-    printWindow.document.close();
+    setOrderToPrint(order);
   };
 
   // Filter Data
@@ -1152,151 +1152,77 @@ export default function OrderPage() {
 
               {/* LIST PESANAN */}
               {activeOrders.length === 0 ? (
-                <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center my-6 space-y-2">
-                  <div className="w-12 h-12 bg-slate-100 text-slate-400 rounded-full flex items-center justify-center mx-auto">
-                    <CheckCircle2 size={24} />
-                  </div>
+                <div className="my-6 space-y-2 rounded-2xl border border-slate-200 bg-white p-8 text-center">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-100 text-slate-400"><CheckCircle2 size={24} /></div>
                   <p className="text-sm font-bold text-slate-700">Tidak ada pesanan masuk</p>
                   <p className="text-xs text-slate-400">Pesanan baru akan tampil otomatis dan bersuara.</p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   {activeOrders
                     .filter(o => filterSource === "ALL" || (filterSource === "online" ? onlineChannels.includes(o.channel || o.source) : (filterSource === "kasir" ? o.source === "kasir" && !onlineChannels.includes(o.channel || "") : o.source === filterSource)))
                     .map((order) => (
-                      <div 
-                        key={order.id} 
-                        className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs space-y-3"
-                      >
-                        {/* Baris 1: No Transaksi & Sumber */}
-                        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-slate-900 text-xs">{order.orderNumber}</span>
-                              <button
-                                type="button"
-                                onClick={() => handlePrintOrder(order)}
-                                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
-                                aria-label={`Cetak nota ${order.orderNumber}`}
-                              ><Printer size={12} /> Nota</button>
+                      <article key={order.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
+                        <div className="flex items-center gap-2 p-3.5">
+                          <button type="button" aria-expanded={expandedOrderId === order.id} onClick={() => setExpandedOrderId(expandedOrderId === order.id ? null : order.id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                            <div className="min-w-0 flex-1">
+                              <span className="block truncate font-mono text-xs font-black text-slate-900">{order.orderNumber}</span>
+                              <span className="mt-0.5 block truncate text-xs font-semibold text-slate-600">{order.customer?.name || "Pelanggan"}</span>
                             </div>
-                            <span className="text-[10px] text-slate-400">{order.date}</span>
-                          </div>
-
-                          {/* Sumber Kasir / Shop */}
-                          <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase ${
-                            order.source === "kasir" 
-                              ? "bg-blue-50 text-blue-700 border border-blue-200" 
-                              : "bg-orange-50 text-orange-700 border border-orange-200"
-                          }`}>
-                            {order.sourceLabel || ({ kasir: "Kasir", shop: "Shop", shopeefood: "ShopeeFood (SF)", grabfood: "GrabFood (GF)", gofood: "GoFood (GO)" } as Record<string, string>)[order.channel || order.source] || order.source}
-                          </span>
+                            <ChevronRight size={17} className={`shrink-0 text-slate-400 transition-transform ${expandedOrderId === order.id ? "rotate-90" : ""}`} />
+                          </button>
+                          <button type="button" onClick={() => handlePrintOrder(order)} className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50" aria-label={`Cetak nota ${order.orderNumber}`}><Printer size={15}/><span>Cetak</span></button>
                         </div>
 
-                        {/* Baris 2: Info Pelanggan jika ada */}
-                        {(order.customer?.name || order.customer?.phone || order.customer?.address) && (
-                          <div className="text-[11px] text-slate-600 bg-slate-50 p-2.5 rounded-xl space-y-1.5">
-                            <p className="font-semibold text-slate-800">{order.customer?.name || "Pelanggan"}</p>
-                            {order.customer?.phone && (
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-slate-600">WhatsApp: {order.customer.phone}</span>
-                                <a
-                                  href={`https://wa.me/${toWhatsAppNumber(order.customer.phone)}?text=${encodeURIComponent(`Halo ${order.customer?.name || "Pelanggan"}, update pesanan ${order.orderNumber}: ${statusMessageText(order.status)}.`)}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-green-700"
-                                ><MessageCircle size={12}/> WhatsApp</a>
+                        {expandedOrderId === order.id && (
+                          <div className="space-y-3 border-t border-slate-100 p-3.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                              <span className="text-slate-500">{order.date}</span>
+                              <span className={`rounded-full px-2.5 py-1 font-bold uppercase ${order.source === "kasir" ? "bg-blue-50 text-blue-700" : "bg-orange-50 text-orange-700"}`}>
+                                {order.sourceLabel || ({ kasir: "Kasir", shop: "Shop", shopeefood: "ShopeeFood (SF)", grabfood: "GrabFood (GF)", gofood: "GoFood (GO)" } as Record<string, string>)[order.channel || order.source] || order.source}
+                              </span>
+                            </div>
+                            {(order.customer?.phone || order.customer?.address) && (
+                              <div className="space-y-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+                                {order.customer?.phone && <div className="flex flex-wrap items-center justify-between gap-2"><span>WhatsApp: {order.customer.phone}</span><a href={`https://wa.me/${toWhatsAppNumber(order.customer.phone)}?text=${encodeURIComponent(`Halo ${order.customer?.name || "Pelanggan"}, update pesanan ${order.orderNumber}: ${statusMessageText(order.status)}.`)}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-2.5 py-1.5 text-[10px] font-bold text-white"><MessageCircle size={12}/> WhatsApp</a></div>}
+                                {order.customer?.address && <p className="whitespace-pre-wrap">Alamat: {order.customer.address}</p>}
                               </div>
                             )}
-                            {order.customer?.address && <p className="whitespace-pre-wrap text-[10px] text-slate-600">Alamat: {order.customer.address}</p>}
+                            <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 px-3">
+                              {order.items?.map((item, index) => (
+                                <div key={index} className="flex items-start justify-between gap-3 py-2.5 text-xs">
+                                  <div className="min-w-0">
+                                    <p className="font-semibold text-slate-800"><span className="mr-1 text-orange-600">{item.qty}×</span>{item.name}</p>
+                                    {item.selectedVariants?.length ? <p className="mt-0.5 text-[11px] text-orange-700">Rasa: {item.selectedVariants.map(flavor => `${flavor}${item.variantPrices?.[flavor] ? ` (+${formatRp(item.variantPrices[flavor])})` : ""}`).join(", ")}</p> : null}
+                                    {item.cookingMethod && <p className="text-[11px] text-slate-500">Pilihan: {item.cookingMethod}</p>}
+                                    {item.note?.trim() && <p className="text-[11px] text-slate-500">Catatan: {item.note}</p>}
+                                  </div>
+                                  <span className="shrink-0 font-semibold text-slate-600">{formatRp(item.price * item.qty)}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 p-3">
+                              <div><p className="text-[10px] text-slate-500">Total pembayaran</p><p className="font-black text-slate-900">{formatRp(order.total)}</p>{(order.uniqueCode || 0) > 0 && <p className="text-[10px] text-slate-500">Belanja {formatRp(order.subtotal || order.total - (order.uniqueCode || 0))} + kode unik {formatRp(order.uniqueCode || 0)}</p>}</div>
+                              <div className="text-right"><p className="mb-1 text-[10px] font-bold uppercase text-slate-400">Status</p>{renderStatusTag(order.status)}</div>
+                            </div>
+                            {statusKind(order.status) === "pendingPayment" ? (
+                              <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                <p className="text-xs leading-relaxed text-amber-900">Cocokkan nominal total dan kode unik di aplikasi merchant.</p>
+                                {order.paymentProofPath && (proofImageUrls[order.id] ? <button type="button" onClick={() => setProofPreviewUrl(proofImageUrls[order.id])} className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white p-2 text-left"><img src={proofImageUrls[order.id]} alt="Bukti pembayaran privat" className="h-14 w-14 rounded-md object-cover"/><span className="text-[11px] font-bold text-amber-900">Lihat bukti<br/>{formatRp(order.total)}</span></button> : <span className="text-[10px] text-amber-800">Memuat bukti pembayaran…</span>)}
+                                <button onClick={() => confirmQrisPayment(order)} className="w-full rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-black text-white">Pembayaran terverifikasi — kirim ke dapur</button>
+                              </div>
+                            ) : (
+                              <button onClick={() => updateOrderStatus(order.id, statusKind(order.status) === "ready" ? "COMPLETED" : "READY")} className={`w-full rounded-xl px-4 py-3 text-sm font-black transition active:scale-[.99] ${statusKind(order.status) === "ready" ? "bg-slate-900 text-white" : "border border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+                                {statusKind(order.status) === "ready" ? "Pesanan sudah diambil" : "Pesanan Siap"}
+                              </button>
+                            )}
+                            <button onClick={() => { if (window.confirm(`Batalkan pesanan ${order.orderNumber}?`)) updateOrderStatus(order.id, "CANCELED"); }} className="w-full rounded-xl py-2 text-center text-xs font-bold text-red-500 hover:bg-red-50">Batalkan Pesanan</button>
                           </div>
                         )}
-
-                        {/* Baris 3: Makanan yang di pesan */}
-                        <div className="space-y-1.5 text-xs">
-                          {order.items?.map((item, idx) => (
-                            <div key={idx} className="flex justify-between items-start gap-3">
-                              <div className="min-w-0 font-medium text-slate-800">
-                                <div><span className="font-bold text-orange-600 mr-1">{item.qty}x</span>{item.name}</div>
-                                {item.selectedVariants && item.selectedVariants.length > 0 && <p className="ml-5 mt-0.5 text-[11px] text-orange-700">Varian: {item.selectedVariants.join(" + ")}</p>}
-                                {item.cookingMethod && <p className="ml-5 text-[11px] text-slate-600">Pilihan: {item.cookingMethod}</p>}
-                                {item.note?.trim() && <p className="ml-5 text-[11px] text-slate-600">Catatan: {item.note}</p>}
-                              </div>
-                              <span className="text-slate-500 font-semibold shrink-0">{formatRp(item.price * item.qty)}</span>
-                            </div>
-                          ))}
-                        </div>
-
-                        {/* Baris 4: Total & Status Tag */}
-                        <div className="flex items-center justify-between border-t border-slate-100 pt-2.5">
-                          <div>
-                            <span className="text-[10px] text-slate-400 block">Total Pembayaran:</span>
-                            <span className="text-sm font-extrabold text-slate-900">{formatRp(order.total)}</span>
-                            {(order.uniqueCode || 0) > 0 && <span className="block text-[10px] font-semibold text-slate-500">Belanja {formatRp(order.subtotal || order.total - (order.uniqueCode || 0))} + kode unik {formatRp(order.uniqueCode || 0)}</span>}
-                          </div>
-                          <div>
-                            {renderStatusTag(order.status)}
-                          </div>
-                        </div>
-
-                        {/* Baris 5: Tombol Aksi Status */}
-                        <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-100">
-                          {statusKind(order.status) === "pendingPayment" ? (
-                            <div className="col-span-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                              <p className="text-xs leading-relaxed text-amber-900">Pelanggan mengaku sudah membayar QRIS. Cocokkan nominal total + kode unik di aplikasi merchant terlebih dahulu.</p>
-                              {order.paymentProofPath && (proofImageUrls[order.id] ? <button type="button" onClick={() => setProofPreviewUrl(proofImageUrls[order.id])} className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white p-2 text-left"><img src={proofImageUrls[order.id]} alt="Bukti pembayaran privat" className="h-14 w-14 rounded-md object-cover"/><span className="text-[11px] font-bold text-amber-900">Lihat foto bukti<br/>Total: {formatRp(order.total)} {order.uniqueCode ? `• Kode ${formatRp(order.uniqueCode)}` : ""}</span></button> : <span className="text-[10px] text-amber-800">Memuat bukti pembayaran privat…</span>)}
-                              <button onClick={() => confirmQrisPayment(order)} className="w-full rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-black text-white hover:bg-emerald-700">Pembayaran Terverifikasi — Kirim ke Dapur</button>
-                            </div>
-                          ) : (
-                            <>
-                          {/* Tombol: Pesanan di Proses */}
-                          {statusKind(order.status) !== "processing" && (
-                            <button
-                              onClick={() => updateOrderStatus(order.id, "PROCESSING")}
-                              className="py-2 px-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition-all active:scale-95"
-                            >
-                              Pesanan di Proses
-                            </button>
-                          )}
-
-                          {/* Tombol: Pesanan Siap */}
-                          {statusKind(order.status) !== "ready" && (
-                            <button
-                              onClick={() => updateOrderStatus(order.id, "READY")}
-                              className="py-2 px-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-all active:scale-95"
-                            >
-                              Pesanan siap
-                            </button>
-                          )}
-
-                          {/* Tombol Utama: Pesanan sudah diambil (Hilang ke Riwayat) */}
-                          <button
-                            onClick={() => updateOrderStatus(order.id, "COMPLETED")}
-                            className="col-span-2 py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-all"
-                          >
-                            <CheckCircle2 size={14} className="text-emerald-400" />
-                            <span>Pesanan sudah diambil</span>
-                          </button>
-
-                            </>
-                          )}
-
-                          {/* Tombol: Pesanan Dibatalkan (Masuk Riwayat) */}
-                          <button
-                            onClick={() => {
-                              const ok = window.confirm(`Batalkan pesanan ${order.orderNumber}?`);
-                              if (ok) updateOrderStatus(order.id, "CANCELED");
-                            }}
-                            className="col-span-2 py-1.5 text-center text-xs text-red-500 hover:text-red-700 font-semibold"
-                          >
-                            Batalkan Pesanan Ini
-                          </button>
-                        </div>
-                      </div>
+                      </article>
                     ))}
                 </div>
               )}
-
             </div>
           )}
 
@@ -1644,6 +1570,30 @@ export default function OrderPage() {
 
         </nav>
 
+        {orderToPrint && (
+          <div id="order-receipt-print" className="hidden bg-white p-2 font-mono text-black">
+            <h1 className="mb-1 border-b border-dashed border-black pb-2 text-center text-base font-black">Nota Pesanan</h1>
+            <div className="border-b border-dashed border-black py-2 text-[10px] leading-relaxed">
+              <div>No: {orderToPrint.orderNumber}</div><div>Tanggal: {orderToPrint.date}</div>
+              <div>Pelanggan: {orderToPrint.customer?.name || "Pelanggan"}</div>
+              {orderToPrint.customer?.phone && <div>WA: {orderToPrint.customer.phone}</div>}
+            </div>
+            <div className="divide-y divide-dashed divide-slate-400">
+              {orderToPrint.items?.map((item, index) => (
+                <div key={index} className="py-2 text-[10px]">
+                  <div className="flex justify-between gap-2 font-bold"><span>{item.qty}x {item.name}</span><span>{formatRp(item.price * item.qty)}</span></div>
+                  {item.selectedVariants?.length ? <div>Rasa: {item.selectedVariants.map(flavor => `${flavor}${item.variantPrices?.[flavor] ? ` (+${formatRp(item.variantPrices[flavor])})` : ""}`).join(", ")}</div> : null}
+                  {item.cookingMethod && <div>Pilihan: {item.cookingMethod}</div>}
+                  {item.note?.trim() && <div>Catatan: {item.note}</div>}
+                </div>
+              ))}
+            </div>
+            {(orderToPrint.uniqueCode || 0) > 0 && <div className="border-t border-dashed border-black py-2 text-[10px]">Kode unik QRIS: {formatRp(orderToPrint.uniqueCode || 0)}</div>}
+            <div className="flex justify-between border-t border-black py-2 text-xs font-black"><span>TOTAL</span><span>{formatRp(orderToPrint.total)}</span></div>
+            <p className="pt-2 text-center text-[10px]">Terima kasih</p>
+          </div>
+        )}
+        <style jsx global>{`@media print { @page { size: 80mm auto; margin: 4mm; } body * { visibility: hidden !important; } #order-receipt-print, #order-receipt-print * { visibility: visible !important; } #order-receipt-print { display: block !important; position: fixed !important; left: 0 !important; top: 0 !important; width: 72mm !important; max-width: 72mm !important; margin: 0 !important; padding: 0 !important; color: #000 !important; background: #fff !important; } }`}</style>
       </div>
     </div>
   );
