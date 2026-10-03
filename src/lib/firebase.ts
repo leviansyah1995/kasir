@@ -2,7 +2,10 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
 import { getAuth } from "firebase/auth";
 
-// Ganti nilai di bawah ini dengan config dari Firebase Console Anda nanti
+const firebaseAuthDomain = process.env.NODE_ENV === "production"
+  ? "leviankitchen.pages.dev"
+  : process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "realtime-database-11f5b.firebaseapp.com";
+
 const firebaseConfig = {
   apiKey: "AIzaSyBmhKCv64j6UugxMEFgYidSi68YH70illg",
   authDomain: "realtime-database-11f5b.firebaseapp.com",
@@ -14,9 +17,8 @@ const firebaseConfig = {
   measurementId: "G-G9W58EBYM7"
 };
 
-// Initialize Firebase (Mencegah inisialisasi ganda di Next.js)
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+const db = getDatabase(app);
+const auth = getAuth(app);
 
-// Inisialisasi Realtime Database dan Auth
-export const db = getDatabase(app);
-export const auth = getAuth(app);
+export { app, db, auth };
