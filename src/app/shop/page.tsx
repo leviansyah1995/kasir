@@ -49,6 +49,16 @@ const normalizeGooglePhotoUrl = (value?: string | null) => {
 const formatRp = (n: number) => "Rp. " + n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 const formatNumber = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
+// Ubah urutan counter harian menjadi kode acak-semu yang konsisten di semua perangkat.
+// Karena 499 bilangan prima, setiap multiplier 1–498 menghasilkan permutasi unik 1–499.
+const getDailyQrisCode = (dateKey: string, sequence: number) => {
+  let seed = 2166136261;
+  for (let i = 0; i < dateKey.length; i++) seed = Math.imul(seed ^ dateKey.charCodeAt(i), 16777619) >>> 0;
+  const multiplier = (seed % 498) + 1;
+  const offset = (Math.imul(seed ^ 0x9e3779b9, 0x85ebca6b) >>> 0) % 499;
+  return (Math.imul(multiplier, Math.max(0, sequence - 1)) + offset) % 499 + 1;
+};
+
 const prepareProofImage = async (file: File): Promise<File> => {
   // Draw through canvas to strip EXIF/GPS metadata before the photo is uploaded privately.
   const objectUrl = URL.createObjectURL(file);
@@ -392,7 +402,8 @@ export default function ShopPage() {
         return count < 499 ? count + 1 : undefined;
       }, { applyLocally: false });
       if (!counterResult.committed) throw new Error("Kode unik hari ini sudah mencapai batas. Coba lagi besok atau hubungi admin.");
-      const uniqueCode = Number(counterResult.snapshot.val());
+      const allocatedSequence = Number(counterResult.snapshot.val());
+      const uniqueCode = getDailyQrisCode(dateKey, allocatedSequence);
       setUser({ ...user, phone, address });
       setQrisOrderId(orderRef.key || ""); setReservationDateKey(dateKey); setQrisUniqueCode(uniqueCode);
       setPaymentProofFile(null); setPaymentProofPreview(""); setIsQrisOpen(true);
