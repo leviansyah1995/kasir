@@ -3,10 +3,32 @@
     "relation": ["delegate_permission/common.handle_all_urls"],
     "target": {
       "namespace": "android_app",
-      "package_name": "com.leviankitchen.app",
-      "sha256_cert_fingerprints": [
-        "A1:F8:26:EE:50:0A:AC:B5:31:76:F3:BD:7B:A3:A8:F1:C7:23:43:76:43:A0:C6:F5:78:1E:85:48:74:BE:6A:E0"
-      ]
+      "package_name": "com.levianshop.app",
+      "sha256_cert_fingerprints": ["A1:F8:26:EE:50:0A:AC:B5:31:76:F3:BD:7B:A3:A8:F1:C7:23:43:76:43:A0:C6:F5:78:1E:85:48:74:BE:6A:E0"]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.leviankitchen.order",
+      "sha256_cert_fingerprints": ["A1:F8:26:EE:50:0A:AC:B5:31:76:F3:BD:7B:A3:A8:F1:C7:23:43:76:43:A0:C6:F5:78:1E:85:48:74:BE:6A:E0"]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.leviankitchen.kasir",
+      "sha256_cert_fingerprints": ["A1:F8:26:EE:50:0A:AC:B5:31:76:F3:BD:7B:A3:A8:F1:C7:23:43:76:43:A0:C6:F5:78:1E:85:48:74:BE:6A:E0"]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.leviankitchen.monitor",
+      "sha256_cert_fingerprints": ["A1:F8:26:EE:50:0A:AC:B5:31:76:F3:BD:7B:A3:A8:F1:C7:23:43:76:43:A0:C6:F5:78:1E:85:48:74:BE:6A:E0"]
     }
   }
 ]
