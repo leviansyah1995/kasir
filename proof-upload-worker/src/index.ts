@@ -81,6 +81,40 @@ export default {
     const firebaseUser = await firebaseUserForToken(idToken, env);
     if (!firebaseUser) return json({ error: "Sesi Firebase tidak valid. Silakan login ulang." }, 401, origin, env.ALLOWED_ORIGIN);
 
+    // Upload foto produk ke repo publik terpisah. Foto produk memang ditampilkan ke pelanggan;
+    // repo payment-proofs tetap private dan tidak dilewatkan ke jalur publik ini.
+    let parsedForm: FormData | null = null;
+    if (request.method === "POST") {
+      try { parsedForm = await request.formData(); }
+      catch { return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN); }
+      const productFile = parsedForm.get("productImage");
+      if (productFile instanceof File) {
+        if (firebaseUser.email?.toLowerCase() !== ADMIN_EMAIL || firebaseUser.emailVerified !== true) return json({ error: "Hanya admin terverifikasi yang boleh mengunggah foto produk." }, 403, origin, env.ALLOWED_ORIGIN);
+        if (productFile.size < 1) return json({ error: "File foto produk kosong." }, 400, origin, env.ALLOWED_ORIGIN);
+        const productBytes = new Uint8Array(await productFile.arrayBuffer());
+        const isPng = productBytes.length > 8 && productBytes[0] === 0x89 && productBytes[1] === 0x50 && productBytes[2] === 0x4e && productBytes[3] === 0x47;
+        const isJpeg = productBytes.length > 3 && productBytes[0] === 0xff && productBytes[1] === 0xd8 && productBytes[2] === 0xff;
+        const isWebp = productBytes.length > 12 && String.fromCharCode(...productBytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...productBytes.slice(8, 12)) === "WEBP";
+        if (!isPng && !isJpeg && !isWebp) return json({ error: "Foto produk harus berupa JPG, PNG, atau WebP." }, 415, origin, env.ALLOWED_ORIGIN);
+
+        const extension = isPng ? "png" : isWebp ? "webp" : "jpg";
+        const imagePath = `products/${Date.now()}-${crypto.randomUUID()}.${extension}`;
+        const imageApiUrl = `https://api.github.com/repos/leviansyah1995/asset/contents/${imagePath.split("/").map(encodeURIComponent).join("/")}`;
+        const imageResponse = await fetch(imageApiUrl, {
+          method: "PUT",
+          headers: { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "content-type": "application/json", "user-agent": "Leviankitchen-Product-Image-Uploader" },
+          body: JSON.stringify({ message: `Upload foto produk ${imagePath.split("/").pop()}`, content: base64(productBytes), branch: "main" }),
+        });
+        if (!imageResponse.ok) {
+          const detail = await imageResponse.text();
+          console.error("Public product-image upload failed", imageResponse.status, detail.slice(0, 500));
+          return json({ error: "Upload foto produk ke GitHub gagal. Pastikan GITHUB_TOKEN memiliki izin Contents: Read and write pada repo leviansyah1995/asset." }, 502, origin, env.ALLOWED_ORIGIN);
+        }
+        const imageUrl = `https://raw.githubusercontent.com/leviansyah1995/asset/main/${imagePath}`;
+        return json({ imageUrl, path: imagePath }, 200, origin, env.ALLOWED_ORIGIN);
+      }
+    }
+
     // Proxy MP3 publik GitHack server-side supaya Web Audio dapat mendekode MP3 tanpa bergantung pada CORS CDN.
     if (request.method === "GET") {
       const requestedAudioUrl = new URL(request.url).searchParams.get("audioUrl");
@@ -119,8 +153,8 @@ export default {
 
     const contentLength = Number(request.headers.get("content-length") || 0);
     if (contentLength > 6 * 1024 * 1024) return json({ error: "Ukuran upload terlalu besar (maksimal foto 5 MB)." }, 413, origin, env.ALLOWED_ORIGIN);
-    let form: FormData;
-    try { form = await request.formData(); } catch { return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN); }
+    const form = parsedForm;
+    if (!form) return json({ error: "Form upload tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
     const file = form.get("proof");
     const orderId = String(form.get("orderId") || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
     if (!(file instanceof File) || !orderId) return json({ error: "Foto atau nomor pesanan tidak valid." }, 400, origin, env.ALLOWED_ORIGIN);
